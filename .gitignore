@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+*.db
+.env 
+
+## all the comments for these will be layed out later so dont worry about it as of right now. 
