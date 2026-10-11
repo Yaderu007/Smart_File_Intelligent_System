@@ -120,7 +120,7 @@ def calc_avg_size(files: list[dict]) -> float:
         float: The average storage, in bytes, that the files occupy
     """
     if len(files) == 0:
-        return files
+        return 0.0
     
     avg: float = calc_tot_storage(files) / len(files)
     
@@ -138,13 +138,11 @@ def get_largest_files(files: list[dict], n: int) -> list[dict]:
         list[dict]: The shortened, sorted files (in descending order)
     """
     
-    sortFiles:list = []
+    # If the number of files wanted is negative, then none is returnedx
+    if n < 0: 
+        return []
     
-    for (i, file) in enumerate(sorted(key = lambda file: file["size"], reverse = True)):
-        if i < n:
-            sortFiles.append(file)
-        else:
-            break
+    sortFiles: list[dict] = sorted(files, key = lambda file: file["size"], reverse = True)[:n]
+
     
     return sortFiles
-    
