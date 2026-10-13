@@ -1,40 +1,30 @@
+
 import sqlite3
 from datetime import datetime, timezone
 
 from .connection import get_connection
+from .models import Scan
 
 
 def create_scan(scan_path: str) -> int:
     """
-    Create a new scan record in the Scans table.
-
-    Args:
-        scan_path: Directory being scanned.
-
-    Returns:
-        The newly generated scan_id.
-
-    Raises:
-        TypeError: If scan_path is not a string.
-        ValueError: If scan_path is empty.
-        sqlite3.Error: If the database operation fails.
+    Create a new scan record and return its generated ID.
     """
 
-    # Checks input is a string and not None.
+    # Validate the directory path before saving it.
     if not isinstance(scan_path, str):
         raise TypeError("scan_path must be a string.")
 
-    # Check whether the path is empty or contains only whitespace.
     if not scan_path.strip():
         raise ValueError("scan_path cannot be empty.")
 
-    # Record the scan's starting time in UTC.
+    # Store the scan's starting time in UTC.
     scan_timestamp = datetime.now(timezone.utc).isoformat()
 
-    # Open a connection to our SQLite database.
     connection = get_connection()
 
     try:
+        # SQLite automatically generates the scan_id.
         cursor = connection.execute(
             """
             INSERT INTO Scans (scan_path, scan_timestamp)
@@ -43,21 +33,15 @@ def create_scan(scan_path: str) -> int:
             (scan_path, scan_timestamp)
         )
 
-        # Retrieve the automatically generated scan ID.
         scan_id = cursor.lastrowid
 
         if scan_id is None:
-            raise sqlite3.DatabaseError(
-                "Failed to retrieve the new scan ID."
-            )
+            raise sqlite3.DatabaseError("Failed to retrieve the new scan ID.")
 
-        # Save the new scan record permanently.
         connection.commit()
-
         return scan_id
 
     except sqlite3.Error:
-        # Undo any uncommitted changes if the operation fails.
         connection.rollback()
         raise
 
@@ -73,67 +57,37 @@ def update_scan(
     status: str
 ) -> None:
     """
-    Update an existing scan with its final statistics.
-
-    Args:
-        scan_id: ID of the scan to update.
-        file_count: Number of files discovered.
-        total_size: Total size of discovered files in bytes.
-        scan_duration: Time taken to scan, in seconds.
-        status: Current scan status.
-
-    Raises:
-        TypeError: If an argument has an incorrect type.
-        ValueError: If an argument has an invalid value.
-        LookupError: If the scan does not exist.
-        sqlite3.Error: If a database operation fails.
+    Update an existing scan with its statistics and status.
     """
 
-    # Validate the scan ID.
+    # Reject invalid IDs and negative statistics.
     if type(scan_id) is not int:
         raise TypeError("scan_id must be an integer.")
 
     if scan_id <= 0:
         raise ValueError("scan_id must be positive.")
 
-    # Validate the file count.
-    if type(file_count) is not int:
-        raise TypeError("file_count must be an integer.")
+    for name, value in {
+        "file_count": file_count,
+        "total_size": total_size,
+        "scan_duration": scan_duration
+    }.items():
+        if type(value) is not int:
+            raise TypeError(f"{name} must be an integer.")
 
-    if file_count < 0:
-        raise ValueError("file_count cannot be negative.")
+        if value < 0:
+            raise ValueError(f"{name} cannot be negative.")
 
-    # Validate the total storage size.
-    if type(total_size) is not int:
-        raise TypeError("total_size must be an integer.")
-
-    if total_size < 0:
-        raise ValueError("total_size cannot be negative.")
-
-    # Validate the scan duration.
-    if type(scan_duration) is not int:
-        raise TypeError("scan_duration must be an integer.")
-
-    if scan_duration < 0:
-        raise ValueError("scan_duration cannot be negative.")
-
-    # Validate the scan status.
     if not isinstance(status, str):
         raise TypeError("status must be a string.")
 
-    allowed_statuses = {"completed", "incomplete", "failed"}
+    if status not in {"incomplete", "completed", "failed"}:
+        raise ValueError("Invalid scan status.")
 
-    if status not in allowed_statuses:
-        raise ValueError(
-            f"Invalid status '{status}'. "
-            f"Allowed statuses: {sorted(allowed_statuses)}"
-        )
-
-    # Open a connection to SQLite.
     connection = get_connection()
 
     try:
-        # Update the existing scan record.
+        # Update only the scan matching the supplied scan_id.
         cursor = connection.execute(
             """
             UPDATE Scans
@@ -143,62 +97,38 @@ def update_scan(
                 status = ?
             WHERE scan_id = ?
             """,
-            (
-                file_count,
-                total_size,
-                scan_duration,
-                status,
-                scan_id
-            )
+            (file_count, total_size, scan_duration, status, scan_id)
         )
 
-        # Check whether a matching scan was found.
         if cursor.rowcount == 0:
-            raise LookupError(
-                f"Scan with ID {scan_id} does not exist."
-            )
+            raise LookupError(f"Scan with ID {scan_id} does not exist.")
 
-        # Save the changes permanently.
         connection.commit()
 
     except Exception:
-        # Undo uncommitted changes if something goes wrong.
         connection.rollback()
         raise
 
     finally:
-        # Close the database connection.
         connection.close()
 
-def get_scan(scan_id: int) -> dict | None:
+
+def get_scan(scan_id: int) -> Scan | None:
     """
-    Retrieve a scan record using its scan ID.
+    Retrieve a scan by ID.
 
-    Args:
-        scan_id: ID of the scan to retrieve.
-
-    Returns:
-        dict: Scan information if the scan exists.
-        None: If no scan exists with the given ID.
-
-    Raises:
-        TypeError: If scan_id is not an integer.
-        ValueError: If scan_id is not positive.
-        sqlite3.Error: If a database operation fails.
+    Returns a Scan object, or None if the scan does not exist.
     """
 
-    # Validate the scan ID.
     if type(scan_id) is not int:
         raise TypeError("scan_id must be an integer.")
 
     if scan_id <= 0:
         raise ValueError("scan_id must be positive.")
 
-    # Open a connection to SQLite.
     connection = get_connection()
 
     try:
-        # Retrieve the scan matching the given ID.
         cursor = connection.execute(
             """
             SELECT *
@@ -208,38 +138,28 @@ def get_scan(scan_id: int) -> dict | None:
             (scan_id,)
         )
 
-        # Retrieve the first matching row.
-        scan = cursor.fetchone()
+        row = cursor.fetchone()
 
-        # Return None if the scan does not exist.
-        if scan is None:
+        if row is None:
             return None
 
-        # Convert the SQLite row into a dictionary.
-        return dict(scan)
+        # Convert the SQLite row into our Scan dataclass.
+        return Scan(**dict(row))
 
     finally:
-        # Close the connection.
         connection.close()
 
 
-def list_scans() -> list[dict]:
+def list_scans() -> list[Scan]:
     """
-    Retrieve all scan records, ordered from newest to oldest.
+    Retrieve all scans, ordered from newest to oldest.
 
-    Returns:
-        list[dict]: A list of scan records.
-                    Returns an empty list if no scans exist.
-
-    Raises:
-        sqlite3.Error: If a database operation fails.
+    Returns an empty list if no scans exist.
     """
 
-    # Open a connection to SQLite.
     connection = get_connection()
 
     try:
-        # Retrieve all scans, newest first.
         cursor = connection.execute(
             """
             SELECT *
@@ -248,15 +168,8 @@ def list_scans() -> list[dict]:
             """
         )
 
-        # Retrieve all rows returned by the query.
-        scans = cursor.fetchall()
-
-        # Convert each SQLite row into a dictionary.
-        return [dict(scan) for scan in scans]
+        # Convert every database row into a Scan object.
+        return [Scan(**dict(row)) for row in cursor.fetchall()]
 
     finally:
-        # Always close the database connection.
         connection.close()
-
-
-
