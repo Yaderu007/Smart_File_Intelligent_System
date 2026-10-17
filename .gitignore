@@ -1,6 +1,25 @@
+# Python cache files
 __pycache__/
-.venv/
-*.db
-.env 
+*.py[cod]
 
-## all the comments for these will be layed out later so dont worry about it as of right now. 
+# Virtual environment
+.venv/
+
+# SQLite database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Testing cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Operating system files
+.DS_Store
+Thumbs.db 
