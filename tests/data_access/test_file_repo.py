@@ -422,3 +422,157 @@ def test_save_file_rejects_invalid_size(
 
     with pytest.raises((TypeError, ValueError)):
         file_repo.save_file_metadata(sample_metadata)
+
+
+
+def test_save_files_batch_success(test_database, sample_metadata):
+    """
+    Verify that multiple files are saved in one batch.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+        sample_metadata (dict): Base metadata for insertion.
+
+    Returns:
+        None: The test passes when every file is stored.
+    """
+    first_file = sample_metadata.copy()
+
+    second_file = {
+        **sample_metadata,
+        "path": "/example/documents/notes.txt",
+        "name": "notes.txt",
+        "extension": ".txt",
+        "size": 500,
+    }
+
+    file_ids = file_repo.save_files_batch([first_file, second_file])
+
+    assert len(file_ids) == 2
+    assert all(isinstance(file_id, int) for file_id in file_ids)
+    assert all(file_id > 0 for file_id in file_ids)
+    assert file_ids[0] != file_ids[1]
+
+    saved_files = file_repo.get_files_by_scan(sample_metadata["scan_id"])
+
+    assert len(saved_files) == 2
+
+
+def test_save_files_batch_preserves_input_order(
+    test_database,
+    sample_metadata,
+):
+    """
+    Verify that returned IDs correspond to input file order.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+        sample_metadata (dict): Base metadata for insertion.
+
+    Returns:
+        None: The test passes when IDs match their input files.
+    """
+    files = [
+        {
+            **sample_metadata,
+            "path": f"/example/documents/file_{index}.txt",
+            "name": f"file_{index}.txt",
+        }
+        for index in range(3)
+    ]
+
+    file_ids = file_repo.save_files_batch(files)
+
+    connection = get_connection(test_database)
+
+    try:
+        for index, file_id in enumerate(file_ids):
+            row = connection.execute(
+                "SELECT path FROM Files WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+
+            assert row is not None
+            assert row["path"] == files[index]["path"]
+
+    finally:
+        connection.close()
+
+
+def test_save_files_batch_rolls_back_on_duplicate(
+    test_database,
+    sample_metadata,
+):
+    """
+    Verify that one failed insertion rolls back the entire batch.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+        sample_metadata (dict): Base metadata for insertion.
+
+    Returns:
+        None: The test passes when no partial records remain.
+    """
+    first_file = sample_metadata.copy()
+
+    duplicate_file = {
+        **sample_metadata,
+        "size": 999,
+    }
+
+    # Both files have the same scan_id and path.
+    # This violates UNIQUE(scan_id, path).
+    with pytest.raises(sqlite3.IntegrityError):
+        file_repo.save_files_batch([first_file, duplicate_file])
+
+    saved_files = file_repo.get_files_by_scan(sample_metadata["scan_id"])
+
+    assert saved_files == []
+
+
+def test_save_files_batch_empty_list(test_database):
+    """
+    Verify that saving an empty batch is handled safely.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when no IDs are returned.
+    """
+    file_ids = file_repo.save_files_batch([])
+
+    assert file_ids == []
+
+
+def test_save_files_batch_rejects_invalid_metadata(
+    test_database,
+    sample_metadata,
+):
+    """
+    Verify that invalid metadata does not leave partial records.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+        sample_metadata (dict): Base metadata for insertion.
+
+    Returns:
+        None: The test passes when validation rejects the batch.
+    """
+    invalid_file = {
+        **sample_metadata,
+        "path": "/example/documents/invalid.txt",
+        "name": "invalid.txt",
+        "size": -100,
+    }
+
+    with pytest.raises((TypeError, ValueError)):
+        file_repo.save_files_batch([
+            sample_metadata,
+            invalid_file,
+        ])
+
+    # The valid first file must not remain after failure.
+    saved_files = file_repo.get_files_by_scan(sample_metadata["scan_id"])
+
+    assert saved_files == []

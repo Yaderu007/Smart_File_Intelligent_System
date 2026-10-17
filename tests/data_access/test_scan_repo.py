@@ -1,4 +1,4 @@
-
+from src.data_access import file_repo
 import pytest
 
 from src.data_access import scan_repo
@@ -40,7 +40,42 @@ def test_database(tmp_path, monkeypatch):
         lambda: original_get_connection(database_path),
     )
 
+    monkeypatch.setattr(
+        file_repo,
+        "get_connection",
+        lambda: original_get_connection(database_path),
+    )
+
     return database_path
+
+def make_file_metadata(path: str, size: int = 100, accessible: bool = True) -> dict:
+    """
+    Build a scanner-style metadata dictionary for repository tests.
+
+    Args:
+        path (str): Full path of the sample file.
+        size (int): File size in bytes.
+        accessible (bool): Whether the file was successfully accessed.
+
+    Returns:
+        dict: File metadata compatible with save_files_batch().
+    """
+    from pathlib import Path
+
+    file_path = Path(path)
+
+    return {
+        "path": path,
+        "name": file_path.name,
+        "size": size,
+        "extension": file_path.suffix,
+        "category": "Documents",
+        "created": None,
+        "modified": None,
+        "accessed_timestamp": None,
+        "accessible": accessible,
+        "error": None if accessible else "Permission denied",
+    }
 
 
 def test_create_scan(test_database):
@@ -234,3 +269,224 @@ def test_update_scan_rejects_invalid_status(test_database):
             scan_duration=2,
             status="unknown",
         )
+
+
+
+def test_save_scan_results_success(test_database):
+    """
+    Verify that accessible files are saved and the scan completes.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when scan statistics and saved
+            metadata match the input files.
+    """
+    files = [
+        make_file_metadata("/example/a.pdf", size=100),
+        make_file_metadata("/example/b.txt", size=200),
+    ]
+
+    scan_id = scan_repo.save_scan_results("/example", files)
+
+    scan = scan_repo.get_scan(scan_id)
+
+    assert scan is not None
+    assert scan.status == "completed"
+    assert scan.file_count == 2
+    assert scan.total_size == 300
+
+    # Verify that the metadata was actually inserted.
+    connection = get_connection(test_database)
+
+    try:
+        rows = connection.execute(
+            "SELECT path FROM Files WHERE scan_id = ? ORDER BY file_id",
+            (scan_id,),
+        ).fetchall()
+
+        assert [row["path"] for row in rows] == [
+            "/example/a.pdf",
+            "/example/b.txt",
+        ]
+
+    finally:
+        connection.close()
+
+
+def test_save_scan_results_skips_inaccessible_files(test_database):
+    """
+    Verify that inaccessible files are excluded from the database.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when only accessible files are saved.
+    """
+    files = [
+        make_file_metadata("/example/a.pdf", size=100),
+        make_file_metadata(
+            "/example/secret.pdf",
+            size=200,
+            accessible=False,
+        ),
+        make_file_metadata("/example/c.pdf", size=300),
+    ]
+
+    scan_id = scan_repo.save_scan_results("/example", files)
+
+    scan = scan_repo.get_scan(scan_id)
+
+    assert scan.status == "completed"
+    assert scan.file_count == 2
+    assert scan.total_size == 400
+
+    connection = get_connection(test_database)
+
+    try:
+        rows = connection.execute(
+            "SELECT path FROM Files WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchall()
+
+        saved_paths = {row["path"] for row in rows}
+
+        assert saved_paths == {
+            "/example/a.pdf",
+            "/example/c.pdf",
+        }
+
+        assert "/example/secret.pdf" not in saved_paths
+
+    finally:
+        connection.close()
+
+
+def test_save_scan_results_rolls_back_failed_batch(test_database):
+    """
+    Verify that a failed insertion rolls back the entire file batch.
+
+    A duplicate path violates the Files table's unique constraint.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when no files are saved and
+            the scan is marked failed.
+    """
+    import sqlite3
+
+    files = [
+        make_file_metadata("/example/a.pdf", size=100),
+        make_file_metadata("/example/a.pdf", size=200),
+    ]
+
+    with pytest.raises(sqlite3.IntegrityError):
+        scan_repo.save_scan_results("/example", files)
+
+    connection = get_connection(test_database)
+
+    try:
+        # The scan record survives, but the failed batch does not.
+        scan_row = connection.execute(
+            "SELECT scan_id, status FROM Scans"
+        ).fetchone()
+
+        assert scan_row is not None
+        assert scan_row["status"] == "failed"
+
+        count = connection.execute(
+            "SELECT COUNT(*) FROM Files"
+        ).fetchone()[0]
+
+        assert count == 0
+
+    finally:
+        connection.close()
+
+
+def test_save_scan_results_with_no_files(test_database):
+    """
+    Verify that an empty scan can finish successfully.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when statistics remain zero.
+    """
+    scan_id = scan_repo.save_scan_results("/empty", [])
+
+    scan = scan_repo.get_scan(scan_id)
+
+    assert scan.status == "completed"
+    assert scan.file_count == 0
+    assert scan.total_size == 0
+
+
+def test_save_scan_results_rejects_invalid_metadata(test_database):
+    """
+    Verify that invalid metadata causes a failed scan.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when the invalid item is rejected
+            and the scan is marked failed.
+    """
+    files = [
+        make_file_metadata("/example/a.pdf"),
+        "not a dictionary",
+    ]
+
+    with pytest.raises(TypeError):
+        scan_repo.save_scan_results("/example", files)
+
+    connection = get_connection(test_database)
+
+    try:
+        scan_row = connection.execute(
+            "SELECT status FROM Scans"
+        ).fetchone()
+
+        assert scan_row is not None
+        assert scan_row["status"] == "failed"
+
+        # Validation happens before batch insertion.
+        count = connection.execute(
+            "SELECT COUNT(*) FROM Files"
+        ).fetchone()[0]
+
+        assert count == 0
+
+    finally:
+        connection.close()
+
+
+def test_update_scan_can_mark_failed(test_database):
+    """
+    Verify that an existing scan can be marked failed.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when the status is updated.
+    """
+    scan_id = scan_repo.create_scan("/example")
+
+    scan_repo.update_scan(
+        scan_id=scan_id,
+        file_count=0,
+        total_size=0,
+        scan_duration=2,
+        status="failed",
+    )
+
+    scan = scan_repo.get_scan(scan_id)
+
+    assert scan.status == "failed"

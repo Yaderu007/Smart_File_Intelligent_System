@@ -1,10 +1,11 @@
 
 import sqlite3
 from datetime import datetime, timezone
+from time import monotonic
 
 from .connection import get_connection
 from .models import Scan
-
+from .file_repo import save_files_batch
 
 def create_scan(scan_path: str) -> int:
     """
@@ -228,3 +229,123 @@ def list_scans() -> list[Scan]:
 
     finally:
         connection.close()
+
+
+def save_scan_results(
+    scan_path: str,
+    file_data_list: list[dict]
+) -> int:
+    """
+    Save successfully processed file metadata and finalize a scan.
+
+    Inaccessible files are skipped and are not stored in the database.
+    Accessible files are saved in one batch transaction.
+
+    If the batch insertion fails, its changes are rolled back and
+    the scan is marked as failed.
+
+    Args:
+        scan_path (str): Directory path associated with the scan.
+        file_data_list (list[dict]): Metadata dictionaries produced
+            by the scanner. Each dictionary must contain the fields
+            required by save_files_batch().
+
+    Returns:
+        int: The unique ID of the newly created scan.
+
+    Raises:
+        TypeError: If file_data_list is not a list or contains
+            non-dictionary elements.
+        ValueError: If scan_path or file metadata is invalid.
+        sqlite3.Error: If a database operation fails.
+    """
+
+    # Validate the collection before creating a scan record.
+    if not isinstance(file_data_list, list):
+        raise TypeError("file_data_list must be a list.")
+
+    # Start measuring the time spent saving the scan results.
+    start_time = monotonic()
+
+    # Create a scan record with the default status "incomplete".
+    scan_id = create_scan(scan_path)
+
+    file_count = 0
+    total_size = 0
+
+    try:
+        accessible_files = []
+
+        # Examine each metadata dictionary returned by the scanner.
+        for file_data in file_data_list:
+
+            if not isinstance(file_data, dict):
+                raise TypeError(
+                    "Each file metadata item must be a dictionary."
+                )
+
+            # Skip files that the scanner could not access.
+            # Their metadata and error details are not stored.
+            if file_data.get("accessible") is not True:
+                continue
+
+            # Attach the scan ID without changing the original
+            # dictionary provided by the scanner.
+            prepared_file = {
+                **file_data,
+                "scan_id": scan_id
+            }
+
+            accessible_files.append(prepared_file)
+
+        # Insert all accessible files using one connection and
+        # transaction. A failed insertion rolls back the batch.
+        save_files_batch(accessible_files)
+
+        # Count only the files successfully saved in this batch.
+        file_count = len(accessible_files)
+
+        # Calculate total storage from successfully saved files.
+        # Treat a missing file size (None) as zero bytes.
+        total_size = sum(
+            file_data["size"] or 0
+            for file_data in accessible_files
+        )
+
+        # Calculate elapsed time in whole seconds.
+        duration = int(monotonic() - start_time)
+
+        # Finalize the metadata-saving operation successfully.
+        update_scan(
+            scan_id=scan_id,
+            file_count=file_count,
+            total_size=total_size,
+            scan_duration=duration,
+            status="completed"
+        )
+
+        return scan_id
+
+    except Exception:
+        # Calculate elapsed time even if an operation fails.
+        duration = int(monotonic() - start_time)
+
+        try:
+            # Mark the scan as failed so it is not mistaken
+            # for a successfully completed operation.
+            update_scan(
+                scan_id=scan_id,
+                file_count=file_count,
+                total_size=total_size,
+                scan_duration=duration,
+                status="failed"
+            )
+
+        except Exception:
+            # Preserve the original exception if updating the
+            # scan status also fails. In that situation, the
+            # scan may remain marked as incomplete.
+            pass
+
+        # Re-raise the original error for the calling program.
+        raise

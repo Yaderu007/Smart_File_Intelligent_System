@@ -189,3 +189,152 @@ def test_foreign_key_rejects_invalid_scan(tmp_path):
     finally:
         connection.rollback()
         connection.close()
+
+
+def test_duplicate_groups_table_has_scan_id(tmp_path):
+    """
+    Verify that duplicate groups belong to a specific scan.
+
+    Args:
+        tmp_path (Path): Temporary directory provided by pytest.
+
+    Returns:
+        None: The test passes when scan_id exists in the table.
+    """
+    test_db = tmp_path / "test_files.db"
+    initialize_database(test_db)
+
+    connection = get_connection(test_db)
+
+    try:
+        # Check the columns in the updated DuplicateGroups table.
+        rows = connection.execute(
+            "PRAGMA table_info(DuplicateGroups)"
+        ).fetchall()
+
+        actual_columns = {row["name"] for row in rows}
+
+        # Our updated schema associates each group with a scan.
+        assert "scan_id" in actual_columns
+
+    finally:
+        connection.close()
+
+
+def test_initialize_database_is_idempotent(tmp_path):
+    """
+    Verify that initializing an existing database is safe.
+
+    Running initialization twice should not delete existing
+    records or recreate tables.
+
+    Args:
+        tmp_path (Path): Temporary directory provided by pytest.
+
+    Returns:
+        None: The test passes when existing data is preserved.
+    """
+    test_db = tmp_path / "test_files.db"
+
+    # Create the database and its tables.
+    initialize_database(test_db)
+
+    connection = get_connection(test_db)
+
+    try:
+        # Insert a record that should survive reinitialization.
+        connection.execute(
+            """
+            INSERT INTO Scans (scan_path, scan_timestamp)
+            VALUES (?, ?)
+            """,
+            ("/example", "2026-10-17T12:00:00+00:00"),
+        )
+        connection.commit()
+
+    finally:
+        connection.close()
+
+    # Initialize the same database a second time.
+    initialize_database(test_db)
+
+    connection = get_connection(test_db)
+
+    try:
+        # Verify the existing scan was not removed.
+        count = connection.execute(
+            "SELECT COUNT(*) FROM Scans"
+        ).fetchone()[0]
+
+        assert count == 1
+
+    finally:
+        connection.close()
+
+
+def test_initialize_database_rolls_back_on_sql_error(
+    tmp_path,
+    monkeypatch
+):
+    """
+    Verify that schema initialization is atomic.
+
+    If a SQL statement fails after creating a table, the
+    entire initialization transaction should roll back.
+
+    Args:
+        tmp_path (Path): Temporary directory provided by pytest.
+        monkeypatch (pytest.MonkeyPatch): Fixture for temporarily
+            replacing the schema file location.
+
+    Returns:
+        None: The test passes when partial tables are not retained.
+    """
+    from src.data_access import connection as connection_module
+
+    # Create a temporary project root containing an invalid schema.
+    fake_root = tmp_path / "fake_project"
+    fake_root.mkdir()
+
+    fake_schema = fake_root / "schema.sql"
+
+    fake_schema.write_text(
+        """
+        CREATE TABLE TemporaryTest (id INTEGER PRIMARY KEY);
+        THIS IS INVALID SQL;
+        """,
+        encoding="utf-8",
+    )
+
+    # Make initialize_database() read our temporary schema
+    # instead of the real project's schema.sql.
+    monkeypatch.setattr(
+        connection_module,
+        "PROJECT_ROOT",
+        fake_root,
+    )
+
+    test_db = tmp_path / "rollback_test.db"
+
+    # The invalid SQL must cause initialization to fail.
+    with pytest.raises(sqlite3.Error):
+        initialize_database(test_db)
+
+    connection = get_connection(test_db)
+
+    try:
+        # The earlier CREATE TABLE must also have been undone.
+        row = connection.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            """,
+            ("TemporaryTest",),
+        ).fetchone()
+
+        assert row is None
+
+    finally:
+        connection.close()
+

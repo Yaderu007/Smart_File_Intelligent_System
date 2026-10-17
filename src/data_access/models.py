@@ -60,13 +60,8 @@ class FileHash:
 
 @dataclass
 class DuplicateGroup:
-    """
-    Represents a group of files with matching content hashes.
-
-    Corresponds to a record in the DuplicateGroups table.
-    """
-
     group_id: int
+    scan_id: int  # Scan that owns this duplicate group.
     hash_value: str
     duplicate_count: int
     potential_savings: int

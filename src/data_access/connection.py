@@ -1,3 +1,4 @@
+
 import sqlite3
 from pathlib import Path
 
@@ -14,6 +15,8 @@ def get_connection(database_path: str | Path | None = None) -> sqlite3.Connectio
     Open and configure a connection to a SQLite database.
 
     Enables named column access and foreign-key enforcement.
+    Uses SQLite's default transaction handling so repository
+    functions can explicitly commit or roll back changes.
 
     Args:
         database_path (str | Path | None): Optional path to the database.
@@ -42,6 +45,7 @@ def get_connection(database_path: str | Path | None = None) -> sqlite3.Connectio
         connection.row_factory = sqlite3.Row
 
         # Enforce foreign-key relationships between database tables.
+        # SQLite requires this setting on every new connection.
         connection.execute("PRAGMA foreign_keys = ON;")
 
         return connection
@@ -61,15 +65,19 @@ def initialize_database(database_path: str | Path | None = None) -> None:
     """
     Initialize a SQLite database using schema.sql.
 
-    Creates the database tables if they do not already exist.
-    Existing tables are not modified or migrated.
+    Creates tables and indexes defined in schema.sql within one
+    transaction. If initialization fails, changes made during
+    that transaction are rolled back.
+
+    Existing tables are not modified or migrated because the
+    schema uses CREATE TABLE IF NOT EXISTS.
 
     Args:
         database_path (str | Path | None): Optional path to the database.
             Defaults to the project's smart_files.db.
 
     Returns:
-        None: Creates the database tables without returning a value.
+        None: Initializes the database without returning a value.
 
     Raises:
         FileNotFoundError: If schema.sql cannot be found.
@@ -87,7 +95,8 @@ def initialize_database(database_path: str | Path | None = None) -> None:
         )
 
     try:
-        # Read the SQL statements defining our database tables.
+        # Read the SQL statements defining our database tables
+        # and indexes.
         schema_sql = schema_path.read_text(encoding="utf-8")
 
     except OSError as error:
@@ -101,16 +110,18 @@ def initialize_database(database_path: str | Path | None = None) -> None:
     connection = get_connection(database_path)
 
     try:
-        # Execute all CREATE TABLE statements from schema.sql.
-        # IF NOT EXISTS prevents errors for existing tables,
-        # but does not update their existing columns.
-        connection.executescript(schema_sql)
-
-        # Commit the initialization changes.
-        connection.commit()
+        # executescript() does not automatically make all statements
+        # atomic. Explicit BEGIN and COMMIT ensure that either all
+        # schema changes succeed or none of them are retained.
+        #
+        # BEGIN starts the transaction before the first SQL statement.
+        # COMMIT runs only after the complete schema executes.
+        connection.executescript(
+            "BEGIN;\n" + schema_sql + "\nCOMMIT;"
+        )
 
     except sqlite3.Error:
-        # Roll back any pending transaction if execution fails.
+        # Undo all uncommitted schema changes if execution fails.
         connection.rollback()
         raise
 

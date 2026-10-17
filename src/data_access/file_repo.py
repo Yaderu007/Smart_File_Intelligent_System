@@ -162,6 +162,144 @@ def save_file_metadata(file_data: dict) -> int:
 
 
 
+def save_files_batch(file_data_list: list[dict]) -> list[int]:
+    """
+    Save multiple files' metadata in a single database transaction.
+
+    Every file is validated before insertion. If any insertion fails,
+    the entire batch is rolled back, preventing partially saved batches.
+
+    Args:
+        file_data_list (list[dict]): List of file metadata dictionaries.
+            Each dictionary follows the same format as
+            save_file_metadata() and must include scan_id, path, and name.
+
+    Returns:
+        list[int]: Generated file IDs in the same order as the input.
+            Returns an empty list if no files are provided.
+
+    Raises:
+        TypeError: If the input is not a list, an item is not a
+            dictionary, or accessible is not a boolean.
+        ValueError: If required metadata is missing or invalid.
+        sqlite3.Error: If a database insertion fails.
+    """
+
+    if not isinstance(file_data_list, list):
+        raise TypeError("file_data_list must be a list.")
+
+    if not file_data_list:
+        return []
+
+    # Validate and prepare every file before opening the database.
+    # This also ensures the entire batch follows the same rules
+    # as save_file_metadata().
+    prepared_files = []
+
+    for file_data in file_data_list:
+        if not isinstance(file_data, dict):
+            raise TypeError("Each file must be a metadata dictionary.")
+
+        for field in ("scan_id", "path", "name"):
+            if field not in file_data:
+                raise ValueError(f"Missing required field: {field}")
+
+        scan_id = file_data["scan_id"]
+        path = file_data["path"]
+        name = file_data["name"]
+        size = file_data.get("size")
+        accessible = file_data.get("accessible", True)
+        category = file_data.get("category", "Other")
+
+        if type(scan_id) is not int or scan_id <= 0:
+            raise ValueError("scan_id must be a positive integer.")
+
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("path must be a non-empty string.")
+
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("name must be a non-empty string.")
+
+        if size is not None and (type(size) is not int or size < 0):
+            raise ValueError("size must be a non-negative integer or None.")
+
+        if type(accessible) is not bool:
+            raise TypeError("accessible must be a boolean.")
+
+        if not isinstance(category, str) or not category.strip():
+            raise ValueError("category must be a non-empty string.")
+
+        # Prepare values in the exact order expected by the INSERT.
+        prepared_files.append(
+            (
+                scan_id,
+                path,
+                name,
+                size,
+                file_data.get("extension"),
+                category,
+                file_data.get("created"),
+                file_data.get("modified"),
+                file_data.get("accessed_timestamp"),
+                int(accessible),
+                file_data.get("error"),
+            )
+        )
+
+    connection = get_connection()
+
+    try:
+        # Explicitly begin a transaction so all insertions are atomic.
+        connection.execute("BEGIN")
+
+        file_ids = []
+
+        for values in prepared_files:
+            cursor = connection.execute(
+                """
+                INSERT INTO Files (
+                    scan_id,
+                    path,
+                    name,
+                    size,
+                    extension,
+                    category,
+                    created,
+                    modified,
+                    accessed_timestamp,
+                    accessible,
+                    error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
+
+            file_id = cursor.lastrowid
+
+            if file_id is None:
+                raise sqlite3.DatabaseError(
+                    "Failed to retrieve the new file ID."
+                )
+
+            # Preserve the order of the original input dictionaries.
+            file_ids.append(file_id)
+
+        # Save the entire batch only after every insertion succeeds.
+        connection.commit()
+        return file_ids
+
+    except Exception:
+        # Roll back all insertions if any operation fails.
+        connection.rollback()
+        raise
+
+    finally:
+        # Release the connection even when an error occurs.
+        connection.close()
+
+
+
 def save_file_hash(
     file_id: int,
     hash_value: str,
