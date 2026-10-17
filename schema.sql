@@ -16,18 +16,16 @@ CREATE TABLE IF NOT EXISTS Files (
     file_id INTEGER PRIMARY KEY,
     scan_id INTEGER NOT NULL,
 
-    file_path TEXT NOT NULL,
-    file_name TEXT NOT NULL,
-    file_size INTEGER,
-    file_extension TEXT
+    path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    size INTEGER,
+    extension TEXT,
     category TEXT NOT NULL DEFAULT 'Other',
-
-    created_timestamp TEXT,
-    modified_timestamp TEXT,
+    created TEXT,
+    modified TEXT,
     accessed_timestamp TEXT,
-
-    is_accessible INTEGER NOT NULL DEFAULT 1,
-    error_message TEXT,
+    accessible INTEGER NOT NULL DEFAULT 1,
+    error TEXT,
 
     FOREIGN KEY (scan_id) REFERENCES Scans(scan_id)
 );

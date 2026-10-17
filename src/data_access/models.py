@@ -25,22 +25,23 @@ class FileMetadata:
     Represents metadata for one discovered file.
 
     Corresponds to a record in the Files table.
-    The scanner's field names will be converted to these
-    database field names during integration.
+    Metadata field names match Aaryadeep's scanner output.
+    The database additionally stores file_id, scan_id,
+    and accessed_timestamp.
     """
 
     file_id: int
     scan_id: int
-    file_path: str
-    file_name: str
-    file_size: int | None
-    file_extension: str | None
+    path: str
+    name: str
+    size: int | None
+    extension: str | None
     category: str
-    created_timestamp: str | None
-    modified_timestamp: str | None
+    created: str | None
+    modified: str | None
     accessed_timestamp: str | None
-    is_accessible: bool
-    error_message: str | None
+    accessible: bool
+    error: str | None
 
 
 @dataclass
