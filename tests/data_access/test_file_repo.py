@@ -576,3 +576,167 @@ def test_save_files_batch_rejects_invalid_metadata(
     saved_files = file_repo.get_files_by_scan(sample_metadata["scan_id"])
 
     assert saved_files == []
+
+
+def test_save_files_batch_shared_connection_does_not_commit(
+    test_database,
+    sample_metadata,
+):
+    """
+    Verify that a batch using a caller-provided connection
+    does not commit automatically.
+    """
+
+    connection = get_connection(test_database)
+
+    try:
+        connection.execute("BEGIN")
+
+        file_ids = file_repo.save_files_batch(
+            [sample_metadata],
+            connection=connection,
+        )
+
+        assert len(file_ids) == 1
+
+        # The inserted file is visible inside its own transaction.
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM Files WHERE scan_id = ?",
+            (sample_metadata["scan_id"],),
+        ).fetchone()
+
+        assert row["count"] == 1
+
+        # A separate connection cannot see uncommitted inserts.
+        other_connection = get_connection(test_database)
+
+        try:
+            other_row = other_connection.execute(
+                "SELECT COUNT(*) AS count FROM Files WHERE scan_id = ?",
+                (sample_metadata["scan_id"],),
+            ).fetchone()
+
+            assert other_row["count"] == 0
+
+        finally:
+            other_connection.close()
+
+        # The caller can discard the batch.
+        connection.rollback()
+
+        assert file_repo.get_files_by_scan(
+            sample_metadata["scan_id"]
+        ) == []
+
+    finally:
+        connection.close()
+
+
+def test_save_files_batch_shared_connection_caller_commits(
+    test_database,
+    sample_metadata,
+):
+    """
+    Verify that a caller can commit files inserted through
+    a shared connection.
+    """
+
+    connection = get_connection(test_database)
+
+    try:
+        connection.execute("BEGIN")
+
+        file_ids = file_repo.save_files_batch(
+            [sample_metadata],
+            connection=connection,
+        )
+
+        assert len(file_ids) == 1
+
+        # The caller, not save_files_batch(), commits.
+        connection.commit()
+
+        saved_files = file_repo.get_files_by_scan(
+            sample_metadata["scan_id"]
+        )
+
+        assert len(saved_files) == 1
+        assert saved_files[0].file_id == file_ids[0]
+
+    finally:
+        connection.close()
+
+
+def test_save_files_batch_shared_connection_failure(
+    test_database,
+    sample_metadata,
+):
+    """
+    Verify that a failed shared batch leaves rollback
+    responsibility with the caller.
+    """
+
+    first_file = sample_metadata.copy()
+
+    second_file = {
+        **sample_metadata,
+        "path": "/example/documents/notes.txt",
+        "name": "notes.txt",
+    }
+
+    # Duplicate the first file's path to trigger a constraint error.
+    third_file = sample_metadata.copy()
+
+    connection = get_connection(test_database)
+
+    try:
+        connection.execute("BEGIN")
+
+        with pytest.raises(sqlite3.IntegrityError):
+            file_repo.save_files_batch(
+                [first_file, second_file, third_file],
+                connection=connection,
+            )
+
+        # The caller rolls back every insertion.
+        connection.rollback()
+
+        saved_files = file_repo.get_files_by_scan(
+            sample_metadata["scan_id"]
+        )
+
+        assert saved_files == []
+
+    finally:
+        connection.close()
+
+
+def test_save_files_batch_preserves_inaccessible_file(
+    test_database,
+    sample_metadata,
+):
+    """
+    Verify that batch insertion preserves inaccessible
+    files with unknown sizes and error messages.
+    """
+
+    inaccessible_file = {
+        **sample_metadata,
+        "size": None,
+        "accessible": False,
+        "error": "Permission denied",
+    }
+
+    file_ids = file_repo.save_files_batch([inaccessible_file])
+
+    assert len(file_ids) == 1
+
+    saved_files = file_repo.get_files_by_scan(
+        sample_metadata["scan_id"]
+    )
+
+    assert len(saved_files) == 1
+    assert saved_files[0].size is None
+    assert saved_files[0].accessible is False
+    assert saved_files[0].error == "Permission denied"
+

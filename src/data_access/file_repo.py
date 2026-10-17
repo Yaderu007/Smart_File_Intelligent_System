@@ -5,7 +5,6 @@ from .connection import get_connection
 from .models import FileMetadata, FileHash
 
 
-
 def save_file_metadata(file_data: dict) -> int:
     """
     Save a file's metadata to the Files table.
@@ -161,18 +160,28 @@ def save_file_metadata(file_data: dict) -> int:
         connection.close()
 
 
-
-def save_files_batch(file_data_list: list[dict]) -> list[int]:
+def save_files_batch(
+    file_data_list: list[dict],
+    connection: sqlite3.Connection | None = None
+) -> list[int]:
     """
     Save multiple files' metadata in a single database transaction.
 
     Every file is validated before insertion. If any insertion fails,
-    the entire batch is rolled back, preventing partially saved batches.
+    the entire batch is rolled back when this function owns the
+    database connection.
+
+    When an existing connection is supplied, the caller is responsible
+    for committing, rolling back, and closing that connection. This
+    allows batch insertion to participate in a larger transaction.
 
     Args:
         file_data_list (list[dict]): List of file metadata dictionaries.
             Each dictionary follows the same format as
             save_file_metadata() and must include scan_id, path, and name.
+
+        connection (sqlite3.Connection | None): Optional existing
+            database connection. Defaults to None.
 
     Returns:
         list[int]: Generated file IDs in the same order as the input.
@@ -192,7 +201,7 @@ def save_files_batch(file_data_list: list[dict]) -> list[int]:
         return []
 
     # Validate and prepare every file before opening the database.
-    # This also ensures the entire batch follows the same rules
+    # This ensures that the batch follows the same validation rules
     # as save_file_metadata().
     prepared_files = []
 
@@ -220,6 +229,7 @@ def save_files_batch(file_data_list: list[dict]) -> list[int]:
         if not isinstance(name, str) or not name.strip():
             raise ValueError("name must be a non-empty string.")
 
+        # Unknown sizes are allowed for inaccessible files.
         if size is not None and (type(size) is not int or size < 0):
             raise ValueError("size must be a non-negative integer or None.")
 
@@ -241,21 +251,32 @@ def save_files_batch(file_data_list: list[dict]) -> list[int]:
                 file_data.get("created"),
                 file_data.get("modified"),
                 file_data.get("accessed_timestamp"),
+
+                # SQLite stores booleans as integers.
                 int(accessible),
+
                 file_data.get("error"),
             )
         )
 
-    connection = get_connection()
+    # Determine whether this function owns the database connection.
+    # A caller-provided connection belongs to the caller.
+    owns_connection = connection is None
+
+    # Open a connection only if the caller did not provide one.
+    conn = get_connection() if owns_connection else connection
 
     try:
-        # Explicitly begin a transaction so all insertions are atomic.
-        connection.execute("BEGIN")
+        # Start a transaction for standalone batch operations.
+        # When sharing a connection, the caller controls the
+        # transaction boundary instead.
+        if owns_connection:
+            conn.execute("BEGIN")
 
         file_ids = []
 
         for values in prepared_files:
-            cursor = connection.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO Files (
                     scan_id,
@@ -285,19 +306,24 @@ def save_files_batch(file_data_list: list[dict]) -> list[int]:
             # Preserve the order of the original input dictionaries.
             file_ids.append(file_id)
 
-        # Save the entire batch only after every insertion succeeds.
-        connection.commit()
+        # Commit only when this function owns the connection.
+        # Otherwise, the caller commits the larger transaction.
+        if owns_connection:
+            conn.commit()
+
         return file_ids
 
     except Exception:
-        # Roll back all insertions if any operation fails.
-        connection.rollback()
+        # Roll back only transactions owned by this function.
+        # The caller handles rollback for shared transactions.
+        if owns_connection:
+            conn.rollback()
         raise
 
     finally:
-        # Release the connection even when an error occurs.
-        connection.close()
-
+        # Close only connections opened by this function.
+        if owns_connection:
+            conn.close()
 
 
 def save_file_hash(
@@ -351,7 +377,9 @@ def save_file_hash(
         hash_id = cursor.lastrowid
 
         if hash_id is None:
-            raise sqlite3.DatabaseError("Failed to retrieve the new hash ID.")
+            raise sqlite3.DatabaseError(
+                "Failed to retrieve the new hash ID."
+            )
 
         connection.commit()
         return hash_id

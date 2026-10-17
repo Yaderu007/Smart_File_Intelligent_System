@@ -315,50 +315,61 @@ def test_save_scan_results_success(test_database):
         connection.close()
 
 
-def test_save_scan_results_skips_inaccessible_files(test_database):
-    """
-    Verify that inaccessible files are excluded from the database.
 
-    Args:
-        test_database (Path): Initialized temporary database.
-
-    Returns:
-        None: The test passes when only accessible files are saved.
+def test_save_scan_results_preserves_inaccessible_files(test_database):
     """
+    Verify that inaccessible files are stored along with
+    accessible files, preserving their error information.
+    """
+
     files = [
         make_file_metadata("/example/a.pdf", size=100),
         make_file_metadata(
             "/example/secret.pdf",
-            size=200,
+            size=None,
             accessible=False,
         ),
         make_file_metadata("/example/c.pdf", size=300),
     ]
 
     scan_id = scan_repo.save_scan_results("/example", files)
-
     scan = scan_repo.get_scan(scan_id)
 
+    # Every discovered file counts, including inaccessible ones.
     assert scan.status == "completed"
-    assert scan.file_count == 2
+    assert scan.file_count == 3
+
+    # Unknown file sizes contribute zero to the total.
     assert scan.total_size == 400
 
     connection = get_connection(test_database)
 
     try:
         rows = connection.execute(
-            "SELECT path FROM Files WHERE scan_id = ?",
+            """
+            SELECT path, size, accessible, error
+            FROM Files
+            WHERE scan_id = ?
+            ORDER BY path
+            """,
             (scan_id,),
         ).fetchall()
 
-        saved_paths = {row["path"] for row in rows}
+        assert len(rows) == 3
 
-        assert saved_paths == {
+        saved_files = {row["path"]: row for row in rows}
+
+        assert set(saved_files) == {
             "/example/a.pdf",
+            "/example/secret.pdf",
             "/example/c.pdf",
         }
 
-        assert "/example/secret.pdf" not in saved_paths
+        inaccessible = saved_files["/example/secret.pdf"]
+
+        assert inaccessible["size"] is None
+        assert inaccessible["accessible"] == 0
+        assert inaccessible["error"] == "Permission denied"
 
     finally:
         connection.close()
@@ -490,3 +501,120 @@ def test_update_scan_can_mark_failed(test_database):
     scan = scan_repo.get_scan(scan_id)
 
     assert scan.status == "failed"
+
+
+def test_save_scan_results_third_file_failure_rolls_back(test_database):
+    """
+    Verify that failure on the third insertion rolls back
+    the first two files and preserves a failed scan record.
+    """
+
+    import sqlite3
+
+    files = [
+        make_file_metadata("/example/first.pdf", size=100),
+        make_file_metadata("/example/second.pdf", size=200),
+
+        # Duplicates the first file's path in the same scan.
+        make_file_metadata("/example/first.pdf", size=300),
+    ]
+
+    with pytest.raises(sqlite3.IntegrityError):
+        scan_repo.save_scan_results("/example", files)
+
+    connection = get_connection(test_database)
+
+    try:
+        scan = connection.execute(
+            """
+            SELECT scan_id, status, file_count, total_size
+            FROM Scans
+            """
+        ).fetchone()
+
+        assert scan is not None
+        assert scan["status"] == "failed"
+        assert scan["file_count"] == 0
+        assert scan["total_size"] == 0
+
+        # Neither of the first two successful insertions
+        # should survive the transaction rollback.
+        count = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM Files
+            WHERE scan_id = ?
+            """,
+            (scan["scan_id"],),
+        ).fetchone()
+
+        assert count["count"] == 0
+
+    finally:
+        connection.close()
+
+
+def test_save_scan_results_final_update_failure_rolls_back(
+    test_database,
+    monkeypatch,
+):
+    """
+    Verify that file insertions are rolled back if the final
+    scan status update fails.
+    """
+
+    files = [
+        make_file_metadata("/example/a.pdf", size=100),
+        make_file_metadata("/example/b.pdf", size=200),
+    ]
+
+    original_update_scan = scan_repo.update_scan
+
+    def failing_update_scan(*args, **kwargs):
+        # Simulate failure only when finalizing a completed scan.
+        if kwargs.get("status") == "completed":
+            raise RuntimeError("Simulated final scan update failure")
+
+        return original_update_scan(*args, **kwargs)
+
+    monkeypatch.setattr(
+        scan_repo,
+        "update_scan",
+        failing_update_scan,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Simulated final scan update failure",
+    ):
+        scan_repo.save_scan_results("/example", files)
+
+    connection = get_connection(test_database)
+
+    try:
+        scan = connection.execute(
+            """
+            SELECT scan_id, status, file_count, total_size
+            FROM Scans
+            """
+        ).fetchone()
+
+        assert scan is not None
+        assert scan["status"] == "failed"
+        assert scan["file_count"] == 0
+        assert scan["total_size"] == 0
+
+        count = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM Files
+            WHERE scan_id = ?
+            """,
+            (scan["scan_id"],),
+        ).fetchone()
+
+        assert count["count"] == 0
+
+    finally:
+        connection.close()
+
