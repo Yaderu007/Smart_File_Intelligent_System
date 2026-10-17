@@ -18,8 +18,9 @@ CREATE TABLE IF NOT EXISTS Files (
 
     file_path TEXT NOT NULL,
     file_name TEXT NOT NULL,
-    file_size INTEGER NOT NULL,
-    file_extension TEXT,
+    file_size INTEGER,
+    file_extension TEXT
+    category TEXT NOT NULL DEFAULT 'Other',
 
     created_timestamp TEXT,
     modified_timestamp TEXT,

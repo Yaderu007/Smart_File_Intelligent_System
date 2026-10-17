@@ -35,6 +35,7 @@ class FileMetadata:
     file_name: str
     file_size: int | None
     file_extension: str | None
+    category: str
     created_timestamp: str | None
     modified_timestamp: str | None
     accessed_timestamp: str | None
