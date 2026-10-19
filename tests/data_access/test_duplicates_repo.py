@@ -1087,3 +1087,84 @@ def test_get_duplicate_members_with_custom_database_path(tmp_path):
         "b.txt",
         "a.txt",
     ]
+
+
+def test_duplicate_group_rejects_second_primary(tmp_path):
+    """
+    Verify that a duplicate group cannot contain two primary files.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify the database constraint.
+    """
+
+    import sqlite3
+    import pytest
+
+    from src.data_access.connection import initialize_database
+
+    # Initialize a fresh database with the updated schema.
+    database_path = tmp_path / "primary_constraint.db"
+    initialize_database(database_path)
+
+    # Create a scan in the test database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=database_path,
+    )
+
+    # Create two files belonging to the same scan.
+    file_ids = file_repo.save_files_batch(
+        [
+            {
+                "scan_id": scan_id,
+                "path": "/example/a.txt",
+                "name": "a.txt",
+                "size": 100,
+            },
+            {
+                "scan_id": scan_id,
+                "path": "/example/b.txt",
+                "name": "b.txt",
+                "size": 100,
+            },
+        ],
+        database_path=database_path,
+    )
+
+    # Create a duplicate group.
+    group_id = duplicates_repo.create_duplicate_group(
+        scan_id,
+        "abc123",
+        2,
+        100,
+        database_path=database_path,
+    )
+
+    # The first primary member should be accepted.
+    duplicates_repo.add_duplicate_member(
+        group_id,
+        file_ids[0],
+        is_primary=True,
+        database_path=database_path,
+    )
+
+    # A second primary member must be rejected.
+    with pytest.raises(sqlite3.IntegrityError):
+        duplicates_repo.add_duplicate_member(
+            group_id,
+            file_ids[1],
+            is_primary=True,
+            database_path=database_path,
+        )
+
+    # The rejected insertion must not remove the first primary.
+    members = duplicates_repo.get_duplicate_members(
+        group_id,
+        database_path=database_path,
+    )
+
+    assert len(members) == 1
+    assert members[0].file_id == file_ids[0]

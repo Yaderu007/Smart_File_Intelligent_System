@@ -91,6 +91,11 @@ CREATE TABLE IF NOT EXISTS DuplicateMembers (
         ON DELETE CASCADE
 );
 
+-- Allow at most one primary file per duplicate group.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_duplicate_members_one_primary
+ON DuplicateMembers(group_id)
+WHERE is_primary = 1;
+
 -- Speeds up retrieving files belonging to a particular scan
 -- and sorting them by size.
 CREATE INDEX IF NOT EXISTS idx_files_scan_size
