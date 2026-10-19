@@ -810,3 +810,444 @@ def test_save_files_batch_preserves_inaccessible_file(
     assert saved_files[0].accessible is False
     assert saved_files[0].error == "Permission denied"
 
+
+
+def test_save_file_metadata_with_custom_database_path(
+    tmp_path,
+    monkeypatch
+):
+    """
+    Verify that file metadata is saved to a custom SQLite database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        monkeypatch: Pytest fixture for replacing dependencies.
+
+    Returns:
+        None: Assertions verify the saved file.
+    """
+
+    from src.data_access.connection import (
+        initialize_database,
+        get_connection,
+    )
+
+    # Create a separate database for this test.
+    custom_path = tmp_path / "custom_files.db"
+    initialize_database(custom_path)
+
+    # Restore the real connection function for this test.
+    monkeypatch.setattr(scan_repo, "get_connection", get_connection)
+    monkeypatch.setattr(file_repo, "get_connection", get_connection)
+
+    # Create a scan in the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    # Save file metadata to the custom database.
+    file_id = file_repo.save_file_metadata(
+        {
+            "scan_id": scan_id,
+            "path": "/example/report.pdf",
+            "name": "report.pdf",
+            "size": 1024,
+            "extension": ".pdf",
+            "category": "Documents",
+            "accessible": True,
+        },
+        database_path=custom_path,
+    )
+
+    # Verify the saved file using a separate connection.
+    connection = get_connection(custom_path)
+
+    try:
+        row = connection.execute(
+            "SELECT * FROM Files WHERE file_id = ?",
+            (file_id,),
+        ).fetchone()
+
+        assert row is not None
+        assert row["path"] == "/example/report.pdf"
+        assert row["name"] == "report.pdf"
+        assert row["size"] == 1024
+
+    finally:
+        connection.close()
+
+
+def test_save_files_batch_with_custom_database_path(tmp_path):
+    """
+    Verify that a batch is saved to a custom SQLite database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify both saved files.
+    """
+
+    from src.data_access.connection import (
+        initialize_database,
+        get_connection,
+    )
+
+    # Create an isolated database.
+    custom_path = tmp_path / "custom_batch.db"
+    initialize_database(custom_path)
+
+    # Create a scan using the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    # Save two files in one transaction.
+    file_ids = file_repo.save_files_batch(
+        [
+            {
+                "scan_id": scan_id,
+                "path": "/example/a.txt",
+                "name": "a.txt",
+                "size": 100,
+            },
+            {
+                "scan_id": scan_id,
+                "path": "/example/b.txt",
+                "name": "b.txt",
+                "size": 200,
+            },
+        ],
+        database_path=custom_path,
+    )
+
+    assert len(file_ids) == 2
+
+    # Confirm both files were committed.
+    connection = get_connection(custom_path)
+
+    try:
+        rows = connection.execute(
+            """
+            SELECT path
+            FROM Files
+            WHERE scan_id = ?
+            ORDER BY path
+            """,
+            (scan_id,),
+        ).fetchall()
+
+        assert [row["path"] for row in rows] == [
+            "/example/a.txt",
+            "/example/b.txt",
+        ]
+
+    finally:
+        connection.close()
+
+
+def test_save_file_hash_with_custom_database_path(tmp_path):
+    """
+    Verify that a file hash is saved to a custom SQLite database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify the stored hash.
+    """
+
+    from src.data_access.connection import (
+        initialize_database,
+        get_connection,
+    )
+
+    # Create a separate temporary database.
+    custom_path = tmp_path / "custom_hashes.db"
+    initialize_database(custom_path)
+
+    # Create a scan and file in the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    file_id = file_repo.save_file_metadata(
+        {
+            "scan_id": scan_id,
+            "path": "/example/report.pdf",
+            "name": "report.pdf",
+            "size": 1024,
+        },
+        database_path=custom_path,
+    )
+
+    # Save the hash to the same database.
+    hash_id = file_repo.save_file_hash(
+        file_id,
+        "abc123",
+        "sha256",
+        database_path=custom_path,
+    )
+
+    # Verify the hash using a separate connection.
+    connection = get_connection(custom_path)
+
+    try:
+        row = connection.execute(
+            """
+            SELECT file_id, hash_value, hash_algorithm
+            FROM FileHashes
+            WHERE hash_id = ?
+            """,
+            (hash_id,),
+        ).fetchone()
+
+        assert row is not None
+        assert row["file_id"] == file_id
+        assert row["hash_value"] == "abc123"
+        assert row["hash_algorithm"] == "sha256"
+
+    finally:
+        connection.close()
+
+
+def test_get_files_by_scan_with_custom_database_path(tmp_path):
+    """
+    Verify that files are retrieved from a custom database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify the retrieved files.
+    """
+
+    from src.data_access.connection import initialize_database
+
+    # Create an independent temporary database.
+    custom_path = tmp_path / "custom_scan_files.db"
+    initialize_database(custom_path)
+
+    # Create a scan in the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    # Save files in reverse alphabetical order.
+    file_repo.save_files_batch(
+        [
+            {
+                "scan_id": scan_id,
+                "path": "/example/b.txt",
+                "name": "b.txt",
+                "size": 200,
+            },
+            {
+                "scan_id": scan_id,
+                "path": "/example/a.txt",
+                "name": "a.txt",
+                "size": 100,
+            },
+        ],
+        database_path=custom_path,
+    )
+
+    # Retrieve files using the custom database path.
+    files = file_repo.get_files_by_scan(
+        scan_id,
+        database_path=custom_path,
+    )
+
+    assert len(files) == 2
+    assert [file.path for file in files] == [
+        "/example/a.txt",
+        "/example/b.txt",
+    ]
+
+
+
+def test_get_files_by_extension_with_custom_database_path(tmp_path):
+    """
+    Verify extension filtering using a custom SQLite database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify the matching files.
+    """
+
+    from src.data_access.connection import initialize_database
+
+    # Create a separate temporary database.
+    custom_path = tmp_path / "custom_extensions.db"
+    initialize_database(custom_path)
+
+    # Create a scan in the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    # Save files with different extensions.
+    file_repo.save_files_batch(
+        [
+            {
+                "scan_id": scan_id,
+                "path": "/example/report.PDF",
+                "name": "report.PDF",
+                "extension": ".PDF",
+                "size": 100,
+            },
+            {
+                "scan_id": scan_id,
+                "path": "/example/notes.txt",
+                "name": "notes.txt",
+                "extension": ".txt",
+                "size": 200,
+            },
+        ],
+        database_path=custom_path,
+    )
+
+    # Search using an extension without a leading dot.
+    files = file_repo.get_files_by_extension(
+        scan_id,
+        "pdf",
+        database_path=custom_path,
+    )
+
+    assert len(files) == 1
+    assert files[0].name == "report.PDF"
+    assert files[0].extension == ".PDF"
+
+
+
+def test_get_largest_files_with_custom_database_path(tmp_path):
+    """
+    Verify largest-file retrieval from a custom SQLite database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify file ordering and limits.
+    """
+
+    from src.data_access.connection import initialize_database
+
+    # Create an independent temporary database.
+    custom_path = tmp_path / "custom_largest.db"
+    initialize_database(custom_path)
+
+    # Create a scan in the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    # Save files with different sizes.
+    file_repo.save_files_batch(
+        [
+            {
+                "scan_id": scan_id,
+                "path": "/example/small.txt",
+                "name": "small.txt",
+                "size": 100,
+            },
+            {
+                "scan_id": scan_id,
+                "path": "/example/large.txt",
+                "name": "large.txt",
+                "size": 1000,
+            },
+            {
+                "scan_id": scan_id,
+                "path": "/example/medium.txt",
+                "name": "medium.txt",
+                "size": 500,
+            },
+            {
+                "scan_id": scan_id,
+                "path": "/example/unknown.txt",
+                "name": "unknown.txt",
+                "size": None,
+            },
+        ],
+        database_path=custom_path,
+    )
+
+    # Retrieve only the two largest files.
+    files = file_repo.get_largest_files(
+        scan_id,
+        limit=2,
+        database_path=custom_path,
+    )
+
+    assert len(files) == 2
+    assert [file.name for file in files] == [
+        "large.txt",
+        "medium.txt",
+    ]
+    assert [file.size for file in files] == [1000, 500]
+
+
+def test_get_total_storage_with_custom_database_path(tmp_path):
+    """
+    Verify total storage calculation using a custom database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify the total storage.
+    """
+
+    from src.data_access.connection import initialize_database
+
+    # Create a separate temporary database.
+    custom_path = tmp_path / "custom_storage.db"
+    initialize_database(custom_path)
+
+    # Create a scan in the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    # Save files with known and unknown sizes.
+    file_repo.save_files_batch(
+        [
+            {
+                "scan_id": scan_id,
+                "path": "/example/a.txt",
+                "name": "a.txt",
+                "size": 100,
+            },
+            {
+                "scan_id": scan_id,
+                "path": "/example/b.txt",
+                "name": "b.txt",
+                "size": 250,
+            },
+            {
+                "scan_id": scan_id,
+                "path": "/example/c.txt",
+                "name": "c.txt",
+                "size": None,
+            },
+        ],
+        database_path=custom_path,
+    )
+
+    # Unknown file sizes should not affect the total.
+    total = file_repo.get_total_storage(
+        scan_id,
+        database_path=custom_path,
+    )
+
+    assert total == 350

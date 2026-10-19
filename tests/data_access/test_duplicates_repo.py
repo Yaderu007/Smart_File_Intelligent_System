@@ -817,3 +817,273 @@ def test_deleting_scan_cascades_to_duplicate_records(
 
     finally:
         connection.close()
+
+
+def test_create_duplicate_group_with_custom_database_path(tmp_path):
+    """
+    Verify duplicate group creation in a custom SQLite database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify the saved duplicate group.
+    """
+
+    from src.data_access.connection import (
+        initialize_database,
+        get_connection,
+    )
+
+    # Create a separate temporary database.
+    custom_path = tmp_path / "custom_duplicates.db"
+    initialize_database(custom_path)
+
+    # Create a scan in the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    # Create a duplicate group in the same database.
+    group_id = duplicates_repo.create_duplicate_group(
+        scan_id,
+        "abc123",
+        2,
+        1024,
+        database_path=custom_path,
+    )
+
+    # Verify the saved group using a separate connection.
+    connection = get_connection(custom_path)
+
+    try:
+        row = connection.execute(
+            """
+            SELECT scan_id, hash_value, duplicate_count, potential_savings
+            FROM DuplicateGroups
+            WHERE group_id = ?
+            """,
+            (group_id,),
+        ).fetchone()
+
+        assert row is not None
+        assert row["scan_id"] == scan_id
+        assert row["hash_value"] == "abc123"
+        assert row["duplicate_count"] == 2
+        assert row["potential_savings"] == 1024
+
+    finally:
+        connection.close()
+
+
+def test_add_duplicate_member_with_custom_database_path(tmp_path):
+    """
+    Verify duplicate membership in a custom SQLite database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify the saved membership.
+    """
+
+    from src.data_access.connection import (
+        initialize_database,
+        get_connection,
+    )
+
+    # Create a separate temporary database.
+    custom_path = tmp_path / "custom_members.db"
+    initialize_database(custom_path)
+
+    # Create a scan and file in the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    file_id = file_repo.save_file_metadata(
+        {
+            "scan_id": scan_id,
+            "path": "/example/copy.txt",
+            "name": "copy.txt",
+            "size": 100,
+        },
+        database_path=custom_path,
+    )
+
+    # Create a duplicate group in the same database.
+    group_id = duplicates_repo.create_duplicate_group(
+        scan_id,
+        "abc123",
+        2,
+        100,
+        database_path=custom_path,
+    )
+
+    # Add the file as the group's primary member.
+    duplicates_repo.add_duplicate_member(
+        group_id,
+        file_id,
+        is_primary=True,
+        database_path=custom_path,
+    )
+
+    # Verify the membership using a separate connection.
+    connection = get_connection(custom_path)
+
+    try:
+        row = connection.execute(
+            """
+            SELECT group_id, file_id, is_primary
+            FROM DuplicateMembers
+            WHERE group_id = ? AND file_id = ?
+            """,
+            (group_id, file_id),
+        ).fetchone()
+
+        assert row is not None
+        assert row["group_id"] == group_id
+        assert row["file_id"] == file_id
+        assert row["is_primary"] == 1
+
+    finally:
+        connection.close()
+
+
+def test_get_duplicate_groups_with_custom_database_path(tmp_path):
+    """
+    Verify duplicate groups can be retrieved from a custom database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify the retrieved groups.
+    """
+
+    from src.data_access.connection import initialize_database
+
+    # Create an independent temporary database.
+    custom_path = tmp_path / "custom_groups.db"
+    initialize_database(custom_path)
+
+    # Create a scan in the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    # Create groups with different potential savings.
+    duplicates_repo.create_duplicate_group(
+        scan_id,
+        "hash-small",
+        2,
+        100,
+        database_path=custom_path,
+    )
+
+    duplicates_repo.create_duplicate_group(
+        scan_id,
+        "hash-large",
+        3,
+        1000,
+        database_path=custom_path,
+    )
+
+    # Retrieve groups from the custom database.
+    groups = duplicates_repo.get_duplicate_groups(
+        scan_id,
+        database_path=custom_path,
+    )
+
+    assert len(groups) == 2
+    assert [group.hash_value for group in groups] == [
+        "hash-large",
+        "hash-small",
+    ]
+    assert [group.potential_savings for group in groups] == [
+        1000,
+        100,
+    ]
+
+
+
+def test_get_duplicate_members_with_custom_database_path(tmp_path):
+    """
+    Verify duplicate members can be retrieved from a custom database.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+
+    Returns:
+        None: Assertions verify the retrieved members.
+    """
+
+    from src.data_access.connection import initialize_database
+
+    # Create a separate temporary database.
+    custom_path = tmp_path / "custom_members_read.db"
+    initialize_database(custom_path)
+
+    # Create a scan in the custom database.
+    scan_id = scan_repo.create_scan(
+        "/example",
+        database_path=custom_path,
+    )
+
+    # Save two files in the custom database.
+    file_ids = file_repo.save_files_batch(
+        [
+            {
+                "scan_id": scan_id,
+                "path": "/example/a.txt",
+                "name": "a.txt",
+                "size": 100,
+            },
+            {
+                "scan_id": scan_id,
+                "path": "/example/b.txt",
+                "name": "b.txt",
+                "size": 100,
+            },
+        ],
+        database_path=custom_path,
+    )
+
+    # Create a duplicate group.
+    group_id = duplicates_repo.create_duplicate_group(
+        scan_id,
+        "abc123",
+        2,
+        100,
+        database_path=custom_path,
+    )
+
+    # Add the second file as primary to test ordering.
+    duplicates_repo.add_duplicate_member(
+        group_id,
+        file_ids[0],
+        is_primary=False,
+        database_path=custom_path,
+    )
+
+    duplicates_repo.add_duplicate_member(
+        group_id,
+        file_ids[1],
+        is_primary=True,
+        database_path=custom_path,
+    )
+
+    # Retrieve members from the custom database.
+    members = duplicates_repo.get_duplicate_members(
+        group_id,
+        database_path=custom_path,
+    )
+
+    assert len(members) == 2
+    assert [member.name for member in members] == [
+        "b.txt",
+        "a.txt",
+    ]

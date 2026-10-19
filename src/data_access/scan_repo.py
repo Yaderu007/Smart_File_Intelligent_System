@@ -18,9 +18,11 @@ from .file_repo import save_files_batch
 logger = logging.getLogger(__name__)
 
 
+
 def create_scan(
     scan_path: str,
-    connection: sqlite3.Connection | None = None
+    connection: sqlite3.Connection | None = None,
+    database_path: str | None = None
 ) -> int:
     """
     Create a new directory scan record.
@@ -29,11 +31,14 @@ def create_scan(
     Otherwise, this function commits and closes its own connection.
 
     Args:
-        scan_path: Directory being scanned.
-        connection: Optional existing SQLite connection.
+        scan_path (str): Directory being scanned.
+        connection (sqlite3.Connection | None): Optional existing
+            SQLite connection.
+        database_path (str | None): Optional SQLite database path.
+            Defaults to the project's database.
 
     Returns:
-        The generated scan ID.
+        int: The generated scan ID.
 
     Raises:
         TypeError: If scan_path is not a string.
@@ -52,7 +57,16 @@ def create_scan(
 
     # Only the function that creates a connection should close it.
     owns_connection = connection is None
-    conn = get_connection() if owns_connection else connection
+
+    # Use the requested database only when a path was supplied.
+    if owns_connection:
+        conn = (
+            get_connection()
+            if database_path is None
+            else get_connection(database_path)
+        )
+    else:
+        conn = connection
 
     try:
         cursor = conn.execute(
@@ -92,13 +106,32 @@ def update_scan(
     total_size: int,
     scan_duration: int,
     status: str,
-    connection: sqlite3.Connection | None = None
+    connection: sqlite3.Connection | None = None,
+    database_path: str | None = None
 ) -> None:
     """
     Update a scan's statistics and status.
 
     When an existing connection is provided, the caller controls
     commit, rollback, and connection closure.
+
+    Args:
+        scan_id (int): ID of the scan to update.
+        file_count (int): Number of discovered files.
+        total_size (int): Total file size in bytes.
+        scan_duration (int): Scan duration in whole seconds.
+        status (str): Scan status.
+        connection (sqlite3.Connection | None): Optional connection.
+        database_path (str | None): Optional SQLite database path.
+
+    Returns:
+        None: The scan record is updated.
+
+    Raises:
+        TypeError: If an argument has an invalid type.
+        ValueError: If a value or status is invalid.
+        LookupError: If the scan does not exist.
+        sqlite3.Error: If the database operation fails.
     """
 
     if type(scan_id) is not int:
@@ -125,8 +158,18 @@ def update_scan(
     if status not in {"incomplete", "completed", "failed"}:
         raise ValueError("Invalid scan status.")
 
+    # Only close connections created by this function.
     owns_connection = connection is None
-    conn = get_connection() if owns_connection else connection
+
+    # Use the requested database unless a connection was supplied.
+    if owns_connection:
+        conn = (
+            get_connection()
+            if database_path is None
+            else get_connection(database_path)
+        )
+    else:
+        conn = connection
 
     try:
         cursor = conn.execute(
@@ -165,11 +208,25 @@ def update_scan(
             conn.close()
 
 
-def get_scan(scan_id: int) -> Scan | None:
+
+def get_scan(
+    scan_id: int,
+    database_path: str | None = None
+) -> Scan | None:
     """
     Retrieve a scan by its ID.
 
-    Returns a Scan dataclass or None if the scan does not exist.
+    Args:
+        scan_id (int): ID of the scan to retrieve.
+        database_path (str | None): Optional SQLite database path.
+
+    Returns:
+        Scan | None: The matching scan or None if not found.
+
+    Raises:
+        TypeError: If scan_id is not an integer.
+        ValueError: If scan_id is not positive.
+        sqlite3.Error: If the database operation fails.
     """
 
     if type(scan_id) is not int:
@@ -178,7 +235,12 @@ def get_scan(scan_id: int) -> Scan | None:
     if scan_id <= 0:
         raise ValueError("scan_id must be positive.")
 
-    connection = get_connection()
+    # Open the requested database or use the default connection.
+    connection = (
+        get_connection()
+        if database_path is None
+        else get_connection(database_path)
+    )
 
     try:
         cursor = connection.execute(
@@ -198,17 +260,34 @@ def get_scan(scan_id: int) -> Scan | None:
         return Scan(**dict(row))
 
     finally:
+        # Close the connection after retrieving the scan.
         connection.close()
 
 
-def list_scans() -> list[Scan]:
+
+
+def list_scans(
+    database_path: str | None = None
+) -> list[Scan]:
     """
     Retrieve all scans, newest first.
 
-    Returns Scan dataclass objects.
+    Args:
+        database_path (str | None): Optional SQLite database path.
+
+    Returns:
+        list[Scan]: Scans ordered by timestamp and scan ID.
+
+    Raises:
+        sqlite3.Error: If the database operation fails.
     """
 
-    connection = get_connection()
+    # Open the requested database or use the default connection.
+    connection = (
+        get_connection()
+        if database_path is None
+        else get_connection(database_path)
+    )
 
     try:
         cursor = connection.execute(
@@ -225,12 +304,15 @@ def list_scans() -> list[Scan]:
         ]
 
     finally:
+        # Close the connection after retrieving the scans.
         connection.close()
+
 
 
 def save_scan_results(
     scan_path: str,
-    file_data_list: list[dict]
+    file_data_list: list[dict],
+    database_path: str | None = None
 ) -> int:
     """
     Save file metadata and finalize a scan.
@@ -247,6 +329,7 @@ def save_scan_results(
     Args:
         scan_path: Directory that was scanned.
         file_data_list: Metadata dictionaries from the scanner.
+        database_path (str | None): Optional SQLite database path.
 
     Returns:
         The scan ID when saving succeeds.
@@ -266,7 +349,11 @@ def save_scan_results(
 
     # Create a persistent scan record before inserting files.
     # It initially has status="incomplete".
-    scan_id = create_scan(scan_path)
+    # Create the scan in the requested database.
+    scan_id = create_scan(
+        scan_path,
+        database_path=database_path,
+    )
 
     connection = None
 
@@ -296,8 +383,12 @@ def save_scan_results(
             for file_data in prepared_files
         )
 
-        # Open one shared connection for the entire save operation.
-        connection = get_connection()
+    # Use the requested database for all file insertions.
+        connection = (
+            get_connection()
+            if database_path is None
+            else get_connection(database_path)
+        )
 
         # Explicitly start the transaction.
         connection.execute("BEGIN")
@@ -339,7 +430,8 @@ def save_scan_results(
                 file_count=0,
                 total_size=0,
                 scan_duration=duration,
-                status="failed"
+                status="failed",
+                database_path=database_path,
             )
 
         except Exception:
