@@ -1,0 +1,220 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart File Intelligence</title>
+    
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='css/style.css') }}"
+    >
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="brand">
+            <div class="brand-icon">S</div>
+            <div>
+                <h2>SmartFile</h2>
+                <p>Intelligence System</p>
+            </div>
+        </div>
+
+        <nav>
+            <a class="nav-link active" href="/">Overview</a>
+            <a class="nav-link" href="#categories">File categories</a>
+            <a class="nav-link" href="#largest-files">Largest files</a>
+        </nav>
+
+        <div class="sidebar-footer">
+            <span class="status-dot"></span>
+            Local analysis
+        </div>
+    </aside>
+
+    
+    <main class="main-content">
+        
+        <header class="topbar">
+            <div>
+                <p class="eyebrow">FILE MANAGEMENT</p>
+                <h1>Dashboard</h1>
+                <p class="subtitle">
+                    Understand your files and storage at a glance.
+                </p>
+            </div>
+
+
+            <form action="{{ url_for('start_scan') }}" method="post" class="scan-selector">
+                <label for="scan_path">Directory to scan</label>
+                <input
+                    type="text"
+                    id="scan_path"
+                    name="scan_path"
+                    placeholder="/home/ahmed/Documents"
+                    required
+                >
+                <button type="submit">New Scan</button>
+            </form>
+
+
+            <form method="get" action="/" class="scan-selector">
+                <label for="scan_id">Selected scan</label>
+                <select
+                    id="scan_id"
+                    name="scan_id"
+                    onchange="this.form.submit()"
+                    {% if not scans %}disabled{% endif %}
+                >
+                    {% for scan in scans %}
+                    <option
+                        value="{{ scan.scan_id }}"
+                        {% if selected_scan and scan.scan_id == selected_scan.scan_id %}
+                        selected
+                        {% endif %}
+                    >
+                        Scan #{{ scan.scan_id }} — {{ scan.scan_path }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </form>
+        </header>
+
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% for category, message in messages %}
+                <div class="flash-message {{ category }}" role="status">
+                    {{ message }}
+                </div>
+            {% endfor %}
+        {% endwith %}
+
+        <section class="welcome-panel">
+            <div>
+                <p class="eyebrow">YOUR STORAGE OVERVIEW</p>
+                <h2>Your files, made understandable.</h2>
+                <p>
+                    Scan a directory to discover file types, storage usage,
+                    large files and potential duplicates.
+                </p>
+            </div>
+            <div class="welcome-symbol">⌕</div>
+        </section>
+
+
+        <section class="stats-grid" aria-label="Storage statistics">
+            <article class="stat-card">
+                <p>Total files</p>
+                <h2>{{ selected_scan.file_count if selected_scan else 0 }}</h2>
+                <span>In the selected scan</span>
+            </article>
+
+            <article class="stat-card">
+                <p>Total storage</p>
+                <h2>{{ format_bytes(total_storage) }}</h2>
+                <span>Across scanned files</span>
+            </article>
+
+            <article class="stat-card">
+                <p>Average file size</p>
+                <h2>{{ format_bytes(average_size) }}</h2>
+                <span>Average of known file sizes</span>
+            </article>
+
+            <article class="stat-card">
+                <p>Potential savings</p>
+                <h2>—</h2>
+                <span>From duplicate files</span>
+            </article>
+        </section>
+
+        <section class="content-grid">
+            <article class="panel" id="categories">
+                <div class="panel-heading">
+                    <div>
+                        <h3>Storage by category</h3>
+                        <p>See where your storage is going.</p>
+                    </div>
+
+                    <div class="chart-container">
+                        <canvas id="storageCategoryChart"
+                                aria-label="Doughnut chart showing storage by file category"
+                                role="img"></canvas>
+                    </div>
+
+                    <script id="category-chart-data" type="application/json">
+                        {{ category_stats | tojson }}
+                    </script>
+                </div>
+
+                {% if category_stats %}
+                <div class="category-list">
+                    {% for category, stats in category_stats.items() %}
+                    <div class="category-row">
+                        <div class="category-row-heading">
+                            <strong>{{ category }}</strong>
+                            <span>{{ stats.file_count }} files</span>
+                        </div>
+                        <div class="category-size">
+                            {{ format_bytes(stats.total_size) }}
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="empty-state">
+                    <div class="empty-icon">▦</div>
+                    <h4>No report yet</h4>
+                    <p>Category statistics will appear after a scan.</p>
+                </div>
+                {% endif %}
+            </article>
+
+            <article class="panel" id="largest-files">
+                <div class="panel-heading">
+                    <div>
+                        <h3>Largest files</h3>
+                        <p>Your biggest files, ranked by size.</p>
+                    </div>
+                </div>
+
+                {% if largest_files %}
+                <div class="file-list">
+                    {% for file in largest_files %}
+                    <div class="file-row">
+                        <div class="file-info">
+                            <strong>{{ file.name }}</strong>
+                            <span>{{ file.category }} · {{ file.path }}</span>
+                        </div>
+                        <span class="file-size">
+                            {{ format_bytes(file.size) }}
+                        </span>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="empty-state">
+                    <div class="empty-icon">↗</div>
+                    <h4>Nothing to display yet</h4>
+                    <p>Your largest files will appear here.</p>
+                </div>
+                {% endif %}
+            </article>
+        </section>
+
+
+        <footer class="page-footer">
+            Smart File Intelligence System
+            <span>Local-first file analysis</span>
+        </footer>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script
+        src="{{ url_for('static', filename='js/dashboard.js') }}"
+        defer
+    ></script>
+
+</body>
+</html>
