@@ -352,6 +352,76 @@ def test_save_file_hash(test_database, sample_metadata):
         connection.close()
 
 
+def test_save_file_hash_shared_connection_does_not_commit(
+    test_database,
+    sample_metadata,
+):
+    """
+    Verify that saving a hash with a shared connection
+    leaves commit and rollback responsibility to the caller.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+        sample_metadata (dict): Metadata for the file being hashed.
+
+    Returns:
+        None: Passes when the hash remains uncommitted and
+            the caller can roll back the insertion.
+    """
+
+    file_id = file_repo.save_file_metadata(sample_metadata)
+
+    connection = get_connection(test_database)
+
+    try:
+        connection.execute("BEGIN")
+
+        hash_id = file_repo.save_file_hash(
+            file_id=file_id,
+            hash_value="a" * 64,
+            hash_algorithm="sha256",
+            connection=connection,
+        )
+
+        assert isinstance(hash_id, int)
+
+        # The hash is visible inside the caller's transaction.
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM FileHashes WHERE file_id = ?",
+            (file_id,),
+        ).fetchone()
+
+        assert row["count"] == 1
+
+        # A separate connection cannot see the uncommitted hash.
+        other_connection = get_connection(test_database)
+
+        try:
+            other_row = other_connection.execute(
+                "SELECT COUNT(*) AS count FROM FileHashes WHERE file_id = ?",
+                (file_id,),
+            ).fetchone()
+
+            assert other_row["count"] == 0
+
+        finally:
+            other_connection.close()
+
+        # The caller can roll back the hash insertion.
+        connection.rollback()
+
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM FileHashes WHERE file_id = ?",
+            (file_id,),
+        ).fetchone()
+
+        assert row["count"] == 0
+
+    finally:
+        connection.close()
+
+
+
 def test_duplicate_hash_algorithm_is_rejected(
     test_database,
     sample_metadata,

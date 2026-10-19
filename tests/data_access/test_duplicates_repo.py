@@ -277,6 +277,197 @@ def test_get_duplicate_groups(sample_files, duplicate_group):
     assert groups[0].potential_savings == 2048
 
 
+def test_create_group_shared_connection_does_not_commit(
+    test_database,
+):
+    """
+    Verify that creating a duplicate group with a shared
+    connection leaves the transaction under caller control.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: Passes when the group remains uncommitted and
+            the caller can roll back the insertion.
+    """
+
+    scan_id = scan_repo.create_scan("/example/documents")
+
+    connection = get_connection(test_database)
+
+    try:
+        connection.execute("BEGIN")
+
+        group_id = duplicates_repo.create_duplicate_group(
+            scan_id=scan_id,
+            hash_value="a" * 64,
+            duplicate_count=2,
+            potential_savings=2048,
+            connection=connection,
+        )
+
+        assert isinstance(group_id, int)
+
+        # The group exists inside the caller's transaction.
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM DuplicateGroups WHERE group_id = ?",
+            (group_id,),
+        ).fetchone()
+
+        assert row["count"] == 1
+
+        # A separate connection cannot see the uncommitted group.
+        other_connection = get_connection(test_database)
+
+        try:
+            other_row = other_connection.execute(
+                "SELECT COUNT(*) AS count FROM DuplicateGroups WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+
+            assert other_row["count"] == 0
+
+        finally:
+            other_connection.close()
+
+        # The caller can discard the new group.
+        connection.rollback()
+
+        assert duplicates_repo.get_duplicate_groups(scan_id) == []
+
+    finally:
+        connection.close()
+
+
+
+def test_add_member_shared_connection_does_not_commit(
+    test_database,
+    sample_files,
+):
+    """
+    Verify that adding a duplicate member with a shared
+    connection does not commit the caller's transaction.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+        sample_files (dict): Existing scan and file IDs.
+
+    Returns:
+        None: Passes when the membership remains uncommitted
+            and the caller can roll back the insertion.
+    """
+
+    group_id = duplicates_repo.create_duplicate_group(
+        scan_id=sample_files["scan_id"],
+        hash_value="a" * 64,
+        duplicate_count=2,
+        potential_savings=2048,
+    )
+
+    connection = get_connection(test_database)
+
+    try:
+        connection.execute("BEGIN")
+
+        duplicates_repo.add_duplicate_member(
+            group_id=group_id,
+            file_id=sample_files["first_file_id"],
+            is_primary=True,
+            connection=connection,
+        )
+
+        # The membership exists inside the caller's transaction.
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM DuplicateMembers WHERE group_id = ?",
+            (group_id,),
+        ).fetchone()
+
+        assert row["count"] == 1
+
+        # A separate connection cannot see the uncommitted member.
+        other_connection = get_connection(test_database)
+
+        try:
+            other_row = other_connection.execute(
+                "SELECT COUNT(*) AS count FROM DuplicateMembers WHERE group_id = ?",
+                (group_id,),
+            ).fetchone()
+
+            assert other_row["count"] == 0
+
+        finally:
+            other_connection.close()
+
+        # The caller can roll back the membership insertion.
+        connection.rollback()
+
+        assert duplicates_repo.get_duplicate_members(group_id) == []
+
+    finally:
+        connection.close()
+
+
+
+def test_add_member_shared_connection_failure_leaves_rollback_to_caller(
+    test_database,
+    sample_files,
+):
+    """
+    Verify that a failed shared membership insertion
+    does not roll back earlier work in the transaction.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+        sample_files (dict): Existing scan and file IDs.
+
+    Returns:
+        None: Passes when earlier changes remain pending after
+            the failure and the caller can roll them back.
+    """
+
+    connection = get_connection(test_database)
+
+    try:
+        connection.execute("BEGIN")
+
+        # Create a group within the caller's transaction.
+        group_id = duplicates_repo.create_duplicate_group(
+            scan_id=sample_files["scan_id"],
+            hash_value="a" * 64,
+            duplicate_count=2,
+            potential_savings=2048,
+            connection=connection,
+        )
+
+        # An unknown file ID must cause an integrity error.
+        with pytest.raises(sqlite3.IntegrityError):
+            duplicates_repo.add_duplicate_member(
+                group_id=group_id,
+                file_id=999999,
+                connection=connection,
+            )
+
+        # The earlier group insertion must still be pending.
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM DuplicateGroups WHERE group_id = ?",
+            (group_id,),
+        ).fetchone()
+
+        assert row["count"] == 1
+
+        # The caller decides to roll back the entire transaction.
+        connection.rollback()
+
+        assert duplicates_repo.get_duplicate_groups(
+            sample_files["scan_id"]
+        ) == []
+
+    finally:
+        connection.close()
+
+
+
 def test_get_duplicate_members(sample_files, duplicate_group):
     """
     Verify that duplicate members are returned as FileMetadata objects.
