@@ -1,2 +1,4 @@
 # Testing dependencies
-pytest>=9.1,<10
+pytest>=9.1,<10Flask
+Flask
+pytest
