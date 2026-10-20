@@ -1,27 +1,26 @@
-## metadata.py
+"""metadata.py — Per-file metadata extraction (Aaryadeep)"""
 
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def extract_metadata(file_path):
     """
     Extracts metadata for a single file.
 
-    Args:
-        file_path (str or Path): Path to the file.
-
-    Returns:
-        dict: Metadata for the file. If the file could not be accessed,
-        'accessible' is False and 'error' explains why — callers never
-        need to catch an exception from this function.
+    Per contract v1.2 (C1, S2, S3):
+    - 'path' is always an absolute path.
+    - 'modified' and 'created' are ISO-8601 strings in UTC, with an
+      explicit UTC offset.
+    - 'created' is None where the OS does not track file creation
+      time -- an expected, normal case, not an error.
     """
-    path = Path(file_path)
+    original = Path(file_path)
 
     metadata = {
-        "path": str(path),
-        "name": path.name,
-        "extension": path.suffix.lower(),
+        "path": str(original),
+        "name": original.name,
+        "extension": original.suffix.lower(),
         "size": None,
         "created": None,
         "modified": None,
@@ -30,13 +29,20 @@ def extract_metadata(file_path):
     }
 
     try:
+        path = original.resolve()
+        metadata["path"] = str(path)
+
         stats = path.stat()
         metadata["size"] = stats.st_size
-        metadata["modified"] = datetime.fromtimestamp(stats.st_mtime).isoformat()
+        metadata["modified"] = datetime.fromtimestamp(
+            stats.st_mtime, tz=timezone.utc
+        ).isoformat()
         try:
-            metadata["created"] = datetime.fromtimestamp(stats.st_ctime).isoformat()
+            metadata["created"] = datetime.fromtimestamp(
+                stats.st_ctime, tz=timezone.utc
+            ).isoformat()
         except (OSError, ValueError):
-            metadata["created"] = None  # not every filesystem tracks this
+            metadata["created"] = None
     except (OSError, PermissionError) as e:
         metadata["accessible"] = False
         metadata["error"] = str(e)
