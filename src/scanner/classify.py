@@ -1,6 +1,5 @@
-## classify.py
+"""classify.py — File categorization by extension (Aaryadeep)"""
 
-# Category -> extensions, defined once at module load time
 _CATEGORY_EXTENSIONS = {
     "Documents": {".pdf", ".docx", ".txt", ".md"},
     "Images": {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".svg"},
@@ -10,7 +9,6 @@ _CATEGORY_EXTENSIONS = {
     "Archives": {".zip", ".tar", ".rar", ".gz"},
 }
 
-# Reverse lookup, built once: extension -> category
 _EXTENSION_TO_CATEGORY = {
     ext: category
     for category, extensions in _CATEGORY_EXTENSIONS.items()
@@ -19,13 +17,6 @@ _EXTENSION_TO_CATEGORY = {
 
 
 def categorize(extension):
-    """
-    Categorizes a file based on its extension.
-
-    Args:
-        extension (str): The file extension (including the dot).
-
-    Returns:
-        str: The category of the file, or "Other" if unrecognized.
-    """
+    """Per contract v1.2 (C2): fixed category names, computed once at
+    scan time; downstream components read but never recompute this."""
     return _EXTENSION_TO_CATEGORY.get(extension.lower(), "Other")

@@ -1,38 +1,30 @@
-## traversal.py 
+"""traversal.py — Recursive directory scanning (Aaryadeep)"""
 
 import os
+import logging
 from pathlib import Path
 
 from .metadata import extract_metadata
 from .classify import categorize
 
+logger = logging.getLogger(__name__)
+
 
 def scan_directory(root_path):
     """
     Recursively scans a directory and yields metadata for every file
-    found. Files or directories that cannot be accessed are logged
-    and skipped -- a single bad path never stops the scan.
-
-    Args:
-        root_path (str or Path): Path to the root directory.
-
-    Yields:
-        dict: Metadata for each file found, including its category.
+    found. Per contract v1.2 (C1, S2, S4): root resolved to absolute
+    before walking; problems logged via `logging`, not printed;
+    symlinks never followed; hidden files included.
     """
-    root = Path(root_path)
+    root = Path(root_path).resolve()
 
     if not root.is_dir():
         raise ValueError(f"{root} is not a valid directory.")
 
     def on_walk_error(os_error):
-        # Called by os.walk when a directory can't even be listed
-        # (permission denied, etc.) -- log and keep walking instead
-        # of letting the whole scan crash.
-        print(f"Skipping unreadable directory: {os_error}")
+        logger.warning("Skipping unreadable directory: %s", os_error)
 
-    # followlinks=False (the default) means symlinked directories are
-    # never followed. This is our chosen policy -- it guarantees the
-    # walk terminates even if a symlink points back to an ancestor.
     for dirpath, dirnames, filenames in os.walk(
         root, onerror=on_walk_error, followlinks=False
     ):
@@ -40,7 +32,7 @@ def scan_directory(root_path):
             path = Path(dirpath) / filename
 
             if path.is_symlink():
-                continue  # same policy: skip symlinked files too
+                continue
 
             metadata = extract_metadata(path)
             metadata["category"] = categorize(metadata["extension"])
