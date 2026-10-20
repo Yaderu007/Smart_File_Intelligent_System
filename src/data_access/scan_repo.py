@@ -104,64 +104,82 @@ def update_scan(
     scan_id: int,
     file_count: int,
     total_size: int,
-    scan_duration: int,
+    scan_duration: int | None,
     status: str,
     connection: sqlite3.Connection | None = None,
     database_path: str | None = None
 ) -> None:
     """
-    Update a scan's statistics and status.
+    Update an existing scan's statistics and status.
 
-    When an existing connection is provided, the caller controls
-    commit, rollback, and connection closure.
+    A scan can be marked as incomplete, completed, or failed.
+    The scan duration may be None if the scanner did not provide it.
+
+    When an existing connection is provided, the caller manages
+    committing, rolling back, and closing the connection.
 
     Args:
-        scan_id (int): ID of the scan to update.
-        file_count (int): Number of discovered files.
-        total_size (int): Total file size in bytes.
-        scan_duration (int): Scan duration in whole seconds.
-        status (str): Scan status.
-        connection (sqlite3.Connection | None): Optional connection.
+        scan_id (int): Unique ID of the scan to update.
+        file_count (int): Number of files discovered during the scan.
+        total_size (int): Total size of discovered files in bytes.
+        scan_duration (int | None): Scan duration in whole seconds,
+            or None if the duration is unknown.
+        status (str): Scan status: incomplete, completed, or failed.
+        connection (sqlite3.Connection | None): Optional existing
+            SQLite connection for a shared transaction.
         database_path (str | None): Optional SQLite database path.
+            Used only when no connection is supplied.
 
     Returns:
-        None: The scan record is updated.
+        None: The scan record is updated successfully.
 
     Raises:
         TypeError: If an argument has an invalid type.
-        ValueError: If a value or status is invalid.
-        LookupError: If the scan does not exist.
-        sqlite3.Error: If the database operation fails.
+        ValueError: If a numeric value is negative, scan_id is invalid,
+            or the status is not supported.
+        LookupError: If the specified scan does not exist.
+        sqlite3.Error: If a database operation fails.
     """
 
+    # Validate the scan ID.
     if type(scan_id) is not int:
         raise TypeError("scan_id must be an integer.")
 
     if scan_id <= 0:
         raise ValueError("scan_id must be positive.")
 
-    # Validate each numeric statistic.
+    # Validate file count and total size.
     for name, value in {
         "file_count": file_count,
-        "total_size": total_size,
-        "scan_duration": scan_duration
+        "total_size": total_size
     }.items():
+
         if type(value) is not int:
             raise TypeError(f"{name} must be an integer.")
 
         if value < 0:
             raise ValueError(f"{name} cannot be negative.")
 
+    # Allow None when the scanner does not provide a duration.
+    if scan_duration is not None:
+
+        if type(scan_duration) is not int:
+            raise TypeError("scan_duration must be an integer or None.")
+
+        if scan_duration < 0:
+            raise ValueError("scan_duration cannot be negative.")
+
+    # Validate the scan status.
     if not isinstance(status, str):
         raise TypeError("status must be a string.")
 
     if status not in {"incomplete", "completed", "failed"}:
         raise ValueError("Invalid scan status.")
 
-    # Only close connections created by this function.
+    # Only the function that creates a connection should close it.
     owns_connection = connection is None
 
-    # Use the requested database unless a connection was supplied.
+    # Reuse a supplied connection or open the requested database.
     if owns_connection:
         conn = (
             get_connection()
@@ -172,6 +190,7 @@ def update_scan(
         conn = connection
 
     try:
+        # Update the scan statistics and status.
         cursor = conn.execute(
             """
             UPDATE Scans
@@ -190,20 +209,25 @@ def update_scan(
             )
         )
 
+        # Raise an error if the scan ID does not exist.
         if cursor.rowcount == 0:
             raise LookupError(
                 f"Scan with ID {scan_id} does not exist."
             )
 
+        # Commit only when this function owns the connection.
         if owns_connection:
             conn.commit()
 
     except Exception:
+        # Roll back only transactions owned by this function.
         if owns_connection:
             conn.rollback()
+
         raise
 
     finally:
+        # Never close a connection supplied by another function.
         if owns_connection:
             conn.close()
 

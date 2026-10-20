@@ -1,9 +1,9 @@
 
 """
-Test scanner integration with SQLite database storage.
+Test scanner result persistence in the SQLite database.
 
-These tests verify scan records, file metadata, duplicate groups,
-hash storage, validation, and transaction rollback.
+Tests cover file metadata, hashes, duplicate groups, validation,
+scan statistics, and transaction rollback.
 """
 
 import pytest
@@ -19,7 +19,7 @@ import src.data_access.scanner_service as scanner_service
 @pytest.fixture
 def test_database(tmp_path):
     """
-    Create an isolated SQLite database for integration tests.
+    Create an isolated SQLite database for each test.
 
     Args:
         tmp_path (Path): Temporary directory provided by pytest.
@@ -27,77 +27,165 @@ def test_database(tmp_path):
     Returns:
         Path: Path to the initialized test database.
     """
-
-    # Create a fresh database for each test.
     database_path = tmp_path / "test_integration.db"
-
-    # Initialize all database tables.
     initialize_database(database_path)
-
     return database_path
+
+
+def make_file(path, size=10):
+    """
+    Build a valid scanner metadata record.
+
+    Args:
+        path (Path): Absolute path of the file.
+        size (int | None): Size of the file in bytes.
+
+    Returns:
+        dict: File metadata suitable for database storage.
+    """
+    return {
+        "path": str(path),
+        "name": path.name,
+        "extension": path.suffix.lower(),
+        "size": size,
+        "created": None,
+        "modified": None,
+        "accessible": True,
+        "error": None,
+        "category": "Documents",
+    }
+
+
+def empty_duplicate_result():
+    """
+    Build a duplicate detection result with no duplicates.
+
+    Returns:
+        dict: Empty duplicate groups and file hashes.
+    """
+    return {
+        "duplicate_groups": [],
+        "file_hashes": {},
+    }
+
+
+def assert_failed_scan_without_data(database_path):
+    """
+    Verify that failed persistence leaves no partial file data.
+
+    Args:
+        database_path (Path): Database to inspect.
+
+    Returns:
+        None: Assertions verify the failed scan and empty tables.
+    """
+    connection = get_connection(database_path)
+
+    try:
+        scans = connection.execute(
+            "SELECT * FROM Scans"
+        ).fetchall()
+
+        assert len(scans) == 1
+        assert scans[0]["status"] == "failed"
+        assert scans[0]["file_count"] == 0
+        assert scans[0]["total_size"] == 0
+
+        # No file-related records should survive rollback.
+        for table in (
+            "Files",
+            "FileHashes",
+            "DuplicateGroups",
+            "DuplicateMembers",
+        ):
+            count = connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+
+            assert count == 0
+
+    finally:
+        connection.close()
 
 
 def test_save_scan_stores_files_and_duplicates(tmp_path, test_database):
     """
-    Verify that a scan stores files, hashes, and duplicate groups.
+    Verify that files, hashes, and duplicate groups are saved.
 
     Args:
         tmp_path (Path): Temporary directory provided by pytest.
-        test_database (Path): Initialized temporary database.
+        test_database (Path): Initialized test database.
 
     Returns:
-        None: The test passes when all scan data is saved correctly.
+        None: Assertions verify persisted scan information.
     """
-
-    # Create a temporary directory containing test files.
     scan_directory = tmp_path / "documents"
     scan_directory.mkdir()
 
-    # Create two identical files and one unique file.
-    (scan_directory / "first.txt").write_text("Same content")
-    (scan_directory / "second.txt").write_text("Same content")
-    (scan_directory / "unique.txt").write_text("Different content")
+    first = scan_directory / "first.txt"
+    second = scan_directory / "second.txt"
+    unique = scan_directory / "unique.txt"
 
-    # Scan the directory and save the results.
+    first.write_text("Same content")
+    second.write_text("Same content")
+    unique.write_text("Different content")
+
+    duplicate_size = first.stat().st_size
+
+    files = [
+        make_file(first, duplicate_size),
+        make_file(second, duplicate_size),
+        make_file(unique, unique.stat().st_size),
+    ]
+
+    # Duplicate members arrive in plain path-sorted order.
+    duplicate_result = {
+        "duplicate_groups": [
+            {
+                "hash": "a" * 64,
+                "files": [files[0], files[1]],
+                "count": 2,
+                "potential_savings": duplicate_size,
+            }
+        ],
+        "file_hashes": {
+            str(first): "a" * 64,
+            str(second): "a" * 64,
+        },
+    }
+
     scan_id = save_scan(
-        str(scan_directory),
+        scan_path=str(scan_directory),
+        files=files,
+        duplicate_result=duplicate_result,
+        duration_seconds=3,
         database_path=str(test_database),
     )
 
     connection = get_connection(test_database)
 
     try:
-        # Verify that the scan was completed successfully.
         scan = connection.execute(
             "SELECT * FROM Scans WHERE scan_id = ?",
             (scan_id,),
         ).fetchone()
 
         assert scan is not None
-        assert scan["scan_path"] == str(scan_directory.resolve())
+        assert scan["scan_path"] == str(scan_directory)
         assert scan["status"] == "completed"
         assert scan["file_count"] == 3
-
-        expected_size = (
-            len("Same content".encode()) * 2
-            + len("Different content".encode())
+        assert scan["total_size"] == sum(
+            file["size"] for file in files
         )
+        assert scan["scan_duration"] == 3
 
-        assert scan["total_size"] == expected_size
-
-        # Verify that the scan duration is stored in whole seconds.
-        assert isinstance(scan["scan_duration"], int)
-        assert scan["scan_duration"] >= 0
-
-        # Verify that all three files were saved.
-        files = connection.execute(
+        saved_files = connection.execute(
             "SELECT * FROM Files WHERE scan_id = ?",
             (scan_id,),
         ).fetchall()
 
-        assert len(files) == 3
+        assert len(saved_files) == 3
 
-        # Verify that one duplicate group was created.
         groups = connection.execute(
             "SELECT * FROM DuplicateGroups WHERE scan_id = ?",
             (scan_id,),
@@ -105,11 +193,8 @@ def test_save_scan_stores_files_and_duplicates(tmp_path, test_database):
 
         assert len(groups) == 1
         assert groups[0]["duplicate_count"] == 2
-        assert groups[0]["potential_savings"] == len(
-            "Same content".encode()
-        )
+        assert groups[0]["potential_savings"] == duplicate_size
 
-        # Verify that both duplicate files belong to the group.
         members = connection.execute(
             """
             SELECT f.path, dm.is_primary
@@ -122,16 +207,14 @@ def test_save_scan_stores_files_and_duplicates(tmp_path, test_database):
         ).fetchall()
 
         assert len(members) == 2
-
-        # The first path in plain string sort must be primary.
-        assert members[0]["path"] == str(scan_directory / "first.txt")
+        assert members[0]["path"] == str(first)
         assert members[0]["is_primary"] == 1
+        assert members[1]["path"] == str(second)
         assert members[1]["is_primary"] == 0
 
-        # Verify that both duplicate candidates have SHA-256 hashes.
         hashes = connection.execute(
             """
-            SELECT fh.hash_algorithm
+            SELECT f.path, fh.hash_algorithm, fh.hash_value
             FROM FileHashes AS fh
             JOIN Files AS f ON f.file_id = fh.file_id
             WHERE f.scan_id = ?
@@ -140,41 +223,45 @@ def test_save_scan_stores_files_and_duplicates(tmp_path, test_database):
         ).fetchall()
 
         assert len(hashes) == 2
+        assert {row["path"] for row in hashes} == {
+            str(first),
+            str(second),
+        }
         assert all(
             row["hash_algorithm"] == "sha256"
+            and row["hash_value"] == "a" * 64
             for row in hashes
         )
 
     finally:
-        # Close the verification connection.
         connection.close()
 
 
 def test_save_scan_empty_directory(tmp_path, test_database):
     """
-    Verify that scanning an empty directory creates a completed scan.
+    Verify that an empty file list creates a completed scan.
 
     Args:
         tmp_path (Path): Temporary directory provided by pytest.
-        test_database (Path): Initialized temporary database.
+        test_database (Path): Initialized test database.
 
     Returns:
-        None: The test passes when scan statistics remain zero.
+        None: Assertions verify zero counts and a null duration.
     """
-
-    # Create an empty directory.
     empty_directory = tmp_path / "empty"
     empty_directory.mkdir()
 
     scan_id = save_scan(
-        str(empty_directory),
+        scan_path=str(empty_directory),
+        files=[],
+        duplicate_result=empty_duplicate_result(),
+        duration_seconds=None,
         database_path=str(test_database),
     )
 
     connection = get_connection(test_database)
 
     try:
-        # Verify that the empty scan completed successfully.
         scan = connection.execute(
             "SELECT * FROM Scans WHERE scan_id = ?",
             (scan_id,),
@@ -184,15 +271,14 @@ def test_save_scan_empty_directory(tmp_path, test_database):
         assert scan["status"] == "completed"
         assert scan["file_count"] == 0
         assert scan["total_size"] == 0
-        assert isinstance(scan["scan_duration"], int)
+        assert scan["scan_duration"] is None
 
-        # Verify that no files were inserted.
-        count = connection.execute(
+        file_count = connection.execute(
             "SELECT COUNT(*) FROM Files WHERE scan_id = ?",
             (scan_id,),
         ).fetchone()[0]
 
-        assert count == 0
+        assert file_count == 0
 
     finally:
         connection.close()
@@ -202,273 +288,184 @@ def test_save_scan_empty_directory(tmp_path, test_database):
     "invalid_path",
     ["", "   ", None, 123],
 )
-def test_save_scan_rejects_invalid_paths(invalid_path, test_database):
+def test_save_scan_rejects_invalid_paths(
+    invalid_path,
+    test_database,
+):
     """
-    Verify that invalid directory paths are rejected.
+    Verify that invalid scan paths are rejected.
 
     Args:
-        invalid_path: Invalid directory path to test.
-        test_database (Path): Initialized temporary database.
+        invalid_path: Invalid path value.
+        test_database (Path): Initialized test database.
 
     Returns:
-        None: The test passes when an appropriate error is raised.
+        None: The test passes when validation raises an error.
     """
-
-    # Reject empty paths and unsupported input types.
     with pytest.raises((TypeError, ValueError)):
         save_scan(
-            invalid_path,
+            scan_path=invalid_path,
+            files=[],
             database_path=str(test_database),
         )
 
 
-def test_save_scan_rejects_missing_directory(tmp_path, test_database):
-    """
-    Verify that a nonexistent directory cannot be scanned.
-
-    Args:
-        tmp_path (Path): Temporary directory provided by pytest.
-        test_database (Path): Initialized temporary database.
-
-    Returns:
-        None: The test passes when ValueError is raised.
-    """
-
-    missing_directory = tmp_path / "missing"
-
-    # A nonexistent directory must not start a scan.
-    with pytest.raises(ValueError):
-        save_scan(
-            str(missing_directory),
-            database_path=str(test_database),
-        )
-
-
-def test_save_scan_rejects_empty_file_path(
+def test_save_scan_accepts_previously_scanned_path(
     tmp_path,
     test_database,
-    monkeypatch,
 ):
     """
-    Verify that scanner metadata with an empty path is rejected.
+    Verify that persistence does not scan the filesystem again.
 
     Args:
         tmp_path (Path): Temporary directory provided by pytest.
-        test_database (Path): Initialized temporary database.
-        monkeypatch (pytest.MonkeyPatch): Replaces scanner functions.
+        test_database (Path): Initialized test database.
 
     Returns:
-        None: The test passes when invalid metadata is rejected.
+        None: The test passes when supplied metadata is saved.
     """
+    # The backend receives metadata, not a directory to traverse.
+    scan_path = tmp_path / "already_scanned"
 
-    # Return a scanner record with an invalid path.
-    monkeypatch.setattr(
-        scanner_service,
-        "scan_directory",
-        lambda path: [
-            {
-                "path": "",
-                "name": "invalid.txt",
-                "size": 10,
-                "accessible": True,
-            }
-        ],
+    scan_id = save_scan(
+        scan_path=str(scan_path),
+        files=[],
+        duplicate_result=empty_duplicate_result(),
+        duration_seconds=0,
+        database_path=str(test_database),
     )
 
-    monkeypatch.setattr(
-        scanner_service,
-        "detect_duplicates",
-        lambda files: {
-            "duplicate_groups": [],
-            "file_hashes": {},
-        },
-    )
+    connection = get_connection(test_database)
 
-    # The backend must reject the invalid scanner record.
-    with pytest.raises(ValueError, match="non-empty path and name"):
-        save_scan(
-            str(tmp_path),
-            database_path=str(test_database),
-        )
+    try:
+        scan = connection.execute(
+            "SELECT * FROM Scans WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+
+        assert scan["status"] == "completed"
+        assert scan["scan_duration"] == 0
+
+    finally:
+        connection.close()
 
 
-def test_save_scan_rejects_empty_file_name(
+@pytest.mark.parametrize(
+    "invalid_field",
+    ["path", "name"],
+)
+def test_save_scan_rejects_empty_file_metadata(
     tmp_path,
     test_database,
-    monkeypatch,
+    invalid_field,
 ):
     """
-    Verify that scanner metadata with an empty name is rejected.
+    Verify that empty file paths and names cause a failed scan.
 
     Args:
         tmp_path (Path): Temporary directory provided by pytest.
-        test_database (Path): Initialized temporary database.
-        monkeypatch (pytest.MonkeyPatch): Replaces scanner functions.
+        test_database (Path): Initialized test database.
+        invalid_field (str): Metadata field to invalidate.
 
     Returns:
-        None: The test passes when invalid metadata is rejected.
+        None: Assertions verify rejection and rollback.
     """
+    record = make_file(tmp_path / "invalid.txt")
+    record[invalid_field] = ""
 
-    # Return a scanner record with an invalid name.
-    monkeypatch.setattr(
-        scanner_service,
-        "scan_directory",
-        lambda path: [
-            {
-                "path": str(tmp_path / "invalid.txt"),
-                "name": "",
-                "size": 10,
-                "accessible": True,
-            }
-        ],
-    )
-
-    monkeypatch.setattr(
-        scanner_service,
-        "detect_duplicates",
-        lambda files: {
-            "duplicate_groups": [],
-            "file_hashes": {},
-        },
-    )
-
-    # The backend must reject the invalid scanner record.
-    with pytest.raises(ValueError, match="non-empty path and name"):
+    with pytest.raises(
+        ValueError,
+        match="non-empty path and name",
+    ):
         save_scan(
-            str(tmp_path),
+            scan_path=str(tmp_path),
+            files=[record],
+            duplicate_result=empty_duplicate_result(),
+            duration_seconds=1,
             database_path=str(test_database),
         )
+
+    assert_failed_scan_without_data(test_database)
 
 
 def test_save_scan_rejects_unknown_hash_path(
     tmp_path,
     test_database,
-    monkeypatch,
 ):
     """
-    Verify that a hash referencing an unknown file causes failure.
+    Verify that a hash cannot reference an unsaved file.
 
     Args:
         tmp_path (Path): Temporary directory provided by pytest.
-        test_database (Path): Initialized temporary database.
-        monkeypatch (pytest.MonkeyPatch): Replaces duplicate detection.
+        test_database (Path): Initialized test database.
 
     Returns:
-        None: The test passes when the scan fails and rolls back.
+        None: Assertions verify rejection and rollback.
     """
+    known = tmp_path / "known.txt"
+    unknown = tmp_path / "unknown.txt"
 
-    # Create a valid file for the scanner.
-    (tmp_path / "known.txt").write_text("Known content")
-
-    # Return a hash for a file that was never scanned.
-    monkeypatch.setattr(
-        scanner_service,
-        "detect_duplicates",
-        lambda files: {
-            "duplicate_groups": [],
-            "file_hashes": {
-                str(tmp_path / "unknown.txt"): "a" * 64,
-            },
+    duplicate_result = {
+        "duplicate_groups": [],
+        "file_hashes": {
+            str(unknown): "a" * 64,
         },
-    )
+    }
 
     with pytest.raises(KeyError, match="unknown file path"):
         save_scan(
-            str(tmp_path),
+            scan_path=str(tmp_path),
+            files=[make_file(known)],
+            duplicate_result=duplicate_result,
+            duration_seconds=2,
             database_path=str(test_database),
         )
 
-    connection = get_connection(test_database)
-
-    try:
-        # The scan remains failed without any saved files.
-        scan = connection.execute(
-            "SELECT * FROM Scans"
-        ).fetchone()
-
-        assert scan is not None
-        assert scan["status"] == "failed"
-
-        count = connection.execute(
-            "SELECT COUNT(*) FROM Files"
-        ).fetchone()[0]
-
-        assert count == 0
-
-    finally:
-        connection.close()
+    assert_failed_scan_without_data(test_database)
 
 
 def test_save_scan_rejects_unknown_duplicate_path(
     tmp_path,
     test_database,
-    monkeypatch,
 ):
     """
-    Verify that duplicate members must reference saved files.
+    Verify that duplicate members reference saved files only.
 
     Args:
         tmp_path (Path): Temporary directory provided by pytest.
-        test_database (Path): Initialized temporary database.
-        monkeypatch (pytest.MonkeyPatch): Replaces duplicate detection.
+        test_database (Path): Initialized test database.
 
     Returns:
-        None: The test passes when the scan fails and rolls back.
+        None: Assertions verify rejection and rollback.
     """
+    known = tmp_path / "known.txt"
+    unknown = tmp_path / "unknown.txt"
 
-    # Create a valid file for the scanner.
-    (tmp_path / "known.txt").write_text("Known content")
-
-    # Return a duplicate group referencing an unknown file.
-    monkeypatch.setattr(
-        scanner_service,
-        "detect_duplicates",
-        lambda files: {
-            "duplicate_groups": [
-                {
-                    "hash": "a" * 64,
-                    "count": 2,
-                    "potential_savings": 10,
-                    "files": [
-                        {"path": str(tmp_path / "known.txt")},
-                        {"path": str(tmp_path / "unknown.txt")},
-                    ],
-                }
-            ],
-            "file_hashes": {},
-        },
-    )
+    duplicate_result = {
+        "duplicate_groups": [
+            {
+                "hash": "a" * 64,
+                "count": 2,
+                "potential_savings": 10,
+                "files": [
+                    {"path": str(known)},
+                    {"path": str(unknown)},
+                ],
+            }
+        ],
+        "file_hashes": {},
+    }
 
     with pytest.raises(KeyError, match="unknown file path"):
         save_scan(
-            str(tmp_path),
+            scan_path=str(tmp_path),
+            files=[make_file(known)],
+            duplicate_result=duplicate_result,
+            duration_seconds=2,
             database_path=str(test_database),
         )
 
-    connection = get_connection(test_database)
-
-    try:
-        # No duplicate group or file records should remain.
-        scan = connection.execute(
-            "SELECT * FROM Scans"
-        ).fetchone()
-
-        assert scan is not None
-        assert scan["status"] == "failed"
-
-        for table in (
-            "Files",
-            "DuplicateGroups",
-            "DuplicateMembers",
-        ):
-            count = connection.execute(
-                f"SELECT COUNT(*) FROM {table}"
-            ).fetchone()[0]
-
-            assert count == 0
-
-    finally:
-        connection.close()
+    assert_failed_scan_without_data(test_database)
 
 
 def test_save_scan_rolls_back_on_storage_failure(
@@ -477,41 +474,56 @@ def test_save_scan_rolls_back_on_storage_failure(
     monkeypatch,
 ):
     """
-    Verify that a storage error rolls back files and marks the scan failed.
+    Verify rollback and failed status after a storage error.
 
     Args:
         tmp_path (Path): Temporary directory provided by pytest.
-        test_database (Path): Initialized temporary database.
-        monkeypatch (pytest.MonkeyPatch): Replaces the hash-saving function.
+        test_database (Path): Initialized test database.
+        monkeypatch (pytest.MonkeyPatch): Replaces hash storage.
 
     Returns:
-        None: The test passes when only the failed scan record remains.
+        None: Assertions verify atomic database persistence.
     """
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
 
-    scan_directory = tmp_path / "rollback"
-    scan_directory.mkdir()
+    files = [
+        make_file(first),
+        make_file(second),
+    ]
 
-    # Create matching files so duplicate detection calculates hashes.
-    (scan_directory / "first.txt").write_text("Identical")
-    (scan_directory / "second.txt").write_text("Identical")
+    duplicate_result = {
+        "duplicate_groups": [
+            {
+                "hash": "a" * 64,
+                "count": 2,
+                "potential_savings": 10,
+                "files": files,
+            }
+        ],
+        "file_hashes": {
+            str(first): "a" * 64,
+            str(second): "a" * 64,
+        },
+    }
 
     def failing_save_file_hash(*args, **kwargs):
         """
-        Simulate a database failure while saving a file hash.
+        Simulate a failure while storing a file hash.
 
         Args:
-            *args: Positional arguments passed to the function.
-            **kwargs: Keyword arguments passed to the function.
+            *args: Positional arguments.
+            **kwargs: Keyword arguments.
 
         Returns:
-            None: This function always raises an error.
+            None: This function always raises an exception.
 
         Raises:
-            RuntimeError: Always raised to simulate a storage failure.
+            RuntimeError: Always raised for this test.
         """
         raise RuntimeError("Simulated hash storage failure")
 
-    # Force an error after the scan and files have been inserted.
+    # Fail after file records have been inserted.
     monkeypatch.setattr(
         scanner_service,
         "save_file_hash",
@@ -523,36 +535,23 @@ def test_save_scan_rolls_back_on_storage_failure(
         match="Simulated hash storage failure",
     ):
         save_scan(
-            str(scan_directory),
+            scan_path=str(tmp_path),
+            files=files,
+            duplicate_result=duplicate_result,
+            duration_seconds=4,
             database_path=str(test_database),
         )
+
+    assert_failed_scan_without_data(test_database)
 
     connection = get_connection(test_database)
 
     try:
-        # Verify that the original scan remains marked as failed.
-        scans = connection.execute(
+        scan = connection.execute(
             "SELECT * FROM Scans"
-        ).fetchall()
+        ).fetchone()
 
-        assert len(scans) == 1
-        assert scans[0]["status"] == "failed"
-        assert scans[0]["file_count"] == 0
-        assert scans[0]["total_size"] == 0
-        assert isinstance(scans[0]["scan_duration"], int)
-
-        # Verify that no partial file or duplicate records remain.
-        for table in (
-            "Files",
-            "FileHashes",
-            "DuplicateGroups",
-            "DuplicateMembers",
-        ):
-            count = connection.execute(
-                f"SELECT COUNT(*) FROM {table}"
-            ).fetchone()[0]
-
-            assert count == 0
+        assert scan["scan_duration"] == 4
 
     finally:
         connection.close()

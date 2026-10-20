@@ -1,16 +1,14 @@
 
 """
-Coordinate directory scanning and database storage.
+Save scanner results and duplicate information in SQLite.
 
-This module saves scanned files, calculated hashes, and duplicate
-information while preserving the status of each scan.
+The initial scan record is committed separately. File metadata,
+hashes, duplicate groups, and completion statistics are saved
+within one transaction.
 """
 
 import sqlite3
-import time
-from pathlib import Path
 
-from src.scanner import scan_directory, detect_duplicates
 from src.data_access.connection import get_connection
 from src.data_access.scan_repo import create_scan, update_scan
 from src.data_access.file_repo import save_files_batch, save_file_hash
@@ -22,174 +20,186 @@ from src.data_access.duplicates_repo import (
 
 def save_scan(
     scan_path: str,
-    database_path: str | None = None
+    files: list[dict],
+    duplicate_result: dict | None = None,
+    duration_seconds: int | None = None,
+    database_path: str | None = None,
 ) -> int:
     """
-    Scan a directory and save its results in the database.
+    Save scanner results and return the completed scan ID.
 
-    The initial scan record is committed before file storage begins.
-    File metadata, hashes, duplicate groups, and completion statistics
-    are then saved within one transaction.
-
-    If saving fails, file-related changes are rolled back and the
-    existing scan record is marked as failed.
+    First commits an incomplete scan record. All file metadata,
+    hashes, duplicate groups, members, and the final status update
+    are saved in one transaction. On failure, the transaction is
+    rolled back and the scan is marked failed separately.
 
     Args:
-        scan_path (str): Directory to scan.
+        scan_path (str): Root directory that was scanned.
+        files (list[dict]): File metadata returned by the scanner.
+        duplicate_result (dict | None): Duplicate groups and hashes
+            returned by duplicate detection, or None if unavailable.
+        duration_seconds (int | None): Scan duration in rounded whole
+            seconds, excluding database persistence.
         database_path (str | None): Optional SQLite database path.
-            Uses the configured database when not provided.
 
     Returns:
         int: Unique ID of the completed scan.
 
     Raises:
-        TypeError: If scan_path is not a string or scanner metadata
-            is not a dictionary.
-        ValueError: If the directory or scanner file metadata is invalid.
-        KeyError: If scanner results contain missing required fields
-            or reference a file that was not saved.
+        TypeError: If an argument has an unsupported type.
+        ValueError: If the scan path, file metadata, or duration
+            is invalid.
+        KeyError: If duplicate information references a file
+            that was not saved, or a required result key is missing.
         sqlite3.Error: If a database operation fails.
-        RuntimeError: If a scanner or storage operation raises this error.
     """
 
-    # Validate the supplied directory path.
+    # Validate inputs before creating the scan record.
     if not isinstance(scan_path, str):
         raise TypeError("scan_path must be a string.")
 
     if not scan_path.strip():
         raise ValueError("scan_path cannot be empty.")
 
-    root = Path(scan_path).resolve()
+    if not isinstance(files, list):
+        raise TypeError("files must be a list.")
 
-    if not root.is_dir():
-        raise ValueError(f"{root} is not a valid directory.")
+    if duplicate_result is not None and not isinstance(
+        duplicate_result, dict
+    ):
+        raise TypeError("duplicate_result must be a dictionary or None.")
 
-    # Measure scanning and duplicate detection only.
-    start_time = time.perf_counter()
+    if duration_seconds is not None:
+        if type(duration_seconds) is not int:
+            raise TypeError("duration_seconds must be an integer or None.")
 
-    files = list(scan_directory(str(root)))
-    duplicate_result = detect_duplicates(files)
+        if duration_seconds < 0:
+            raise ValueError("duration_seconds cannot be negative.")
 
-    scan_duration = round(time.perf_counter() - start_time)
-
-    # Validate scanner metadata before saving any file records.
-    for file in files:
-        if not isinstance(file, dict):
-            raise TypeError("Scanner file metadata must be a dictionary.")
-
-        path = file.get("path")
-        name = file.get("name")
-
-        if (
-            not isinstance(path, str)
-            or not path.strip()
-            or not isinstance(name, str)
-            or not name.strip()
-        ):
-            raise ValueError(
-                "Scanner file metadata must contain a non-empty path and name."
-            )
-
-    duplicate_groups = duplicate_result["duplicate_groups"]
-    file_hashes = duplicate_result["file_hashes"]
-
-    # Calculate total storage from valid file sizes.
-    total_size = sum(
-        file["size"]
-        for file in files
-        if type(file.get("size")) is int
-        and file["size"] >= 0
-    )
-
-    # Create and commit the initial incomplete scan record.
+    # Create the incomplete scan using the requested database.
     scan_id = create_scan(
-        scan_path=str(root),
-        database_path=database_path
+        scan_path=scan_path,
+        database_path=database_path,
     )
 
-    # Open one connection for the remaining database operations.
-    conn = get_connection(database_path)
+    conn = None
 
     try:
+        # Begin the shared transaction for all scan data.
+        conn = get_connection(database_path)
         conn.execute("BEGIN")
 
-        # Associate each file with the committed scan.
+        # Reject malformed scanner records.
+        for file in files:
+            if not isinstance(file, dict):
+                raise TypeError("Each file record must be a dictionary.")
+
+            path = file.get("path")
+            name = file.get("name")
+
+            if (
+                not isinstance(path, str)
+                or not path.strip()
+                or not isinstance(name, str)
+                or not name.strip()
+            ):
+                raise ValueError(
+                    "Each file must have a non-empty path and name."
+                )
+
+        # Calculate total size from known nonnegative file sizes.
+        total_size = sum(
+            file["size"]
+            for file in files
+            if type(file.get("size")) is int
+            and file["size"] >= 0
+        )
+
+        # Save file records under the committed scan ID.
         file_records = [
             {**file, "scan_id": scan_id}
             for file in files
         ]
 
-        # Save file metadata and retrieve generated IDs.
         file_ids = save_files_batch(
             file_data_list=file_records,
-            connection=conn
+            connection=conn,
         )
 
-        # Match scanner paths to database file IDs.
+        # Build the path lookup from the IDs returned by storage.
         path_to_id = {
             file["path"]: file_id
             for file, file_id in zip(files, file_ids, strict=True)
         }
 
-        # Save hashes only for known file paths.
-        for path, hash_value in file_hashes.items():
-            if path not in path_to_id:
-                raise KeyError(f"Hash references unknown file path: {path}")
+        if len(path_to_id) != len(files):
+            raise ValueError("Scanner returned duplicate file paths.")
 
-            save_file_hash(
-                file_id=path_to_id[path],
-                hash_value=hash_value,
-                hash_algorithm="sha256",
-                connection=conn
-            )
+        # Store hashes and duplicate groups when provided.
+        if duplicate_result is not None:
+            file_hashes = duplicate_result["file_hashes"]
+            duplicate_groups = duplicate_result["duplicate_groups"]
 
-        # Save duplicate groups and their members.
-        for group in duplicate_groups:
-            # Validate all group members before inserting the group.
-            for file in group["files"]:
-                if file["path"] not in path_to_id:
+            for path, hash_value in file_hashes.items():
+                if path not in path_to_id:
                     raise KeyError(
-                        f"Duplicate group references unknown file path: "
-                        f"{file['path']}"
+                        f"Hash references unknown file path: {path}"
                     )
 
-            group_id = create_duplicate_group(
-                scan_id=scan_id,
-                hash_value=group["hash"],
-                duplicate_count=group["count"],
-                potential_savings=group["potential_savings"],
-                connection=conn
-            )
-
-            # Select the first sorted file as the primary member.
-            for index, file in enumerate(group["files"]):
-                add_duplicate_member(
-                    group_id=group_id,
-                    file_id=path_to_id[file["path"]],
-                    is_primary=(index == 0),
-                    connection=conn
+                save_file_hash(
+                    file_id=path_to_id[path],
+                    hash_value=hash_value,
+                    hash_algorithm="sha256",
+                    connection=conn,
                 )
 
-        # Complete the scan with its measured duration.
+            for group in duplicate_groups:
+                # Validate every member before inserting the group.
+                for file in group["files"]:
+                    path = file["path"]
+
+                    if path not in path_to_id:
+                        raise KeyError(
+                            "Duplicate group references unknown "
+                            f"file path: {path}"
+                        )
+
+                group_id = create_duplicate_group(
+                    scan_id=scan_id,
+                    hash_value=group["hash"],
+                    duplicate_count=group["count"],
+                    potential_savings=group["potential_savings"],
+                    connection=conn,
+                )
+
+                # The scanner's first sorted member is primary.
+                for index, file in enumerate(group["files"]):
+                    add_duplicate_member(
+                        group_id=group_id,
+                        file_id=path_to_id[file["path"]],
+                        is_primary=(index == 0),
+                        connection=conn,
+                    )
+
+        # Mark the scan completed within the same transaction.
         update_scan(
             scan_id=scan_id,
             file_count=len(files),
             total_size=total_size,
-            scan_duration=scan_duration,
+            scan_duration=duration_seconds,
             status="completed",
-            connection=conn
+            connection=conn,
         )
 
-        # Commit all file-related records and the completed status.
         conn.commit()
-
         return scan_id
 
     except Exception:
-        # Roll back incomplete file and duplicate records.
-        conn.rollback()
+        # Undo all file-related changes from this transaction.
+        if conn is not None:
+            conn.rollback()
 
-        # Mark the existing scan as failed using a separate connection.
+        # Preserve the committed scan record with failed status.
         failure_conn = get_connection(database_path)
 
         try:
@@ -197,11 +207,10 @@ def save_scan(
                 scan_id=scan_id,
                 file_count=0,
                 total_size=0,
-                scan_duration=scan_duration,
+                scan_duration=duration_seconds,
                 status="failed",
-                connection=failure_conn
+                connection=failure_conn,
             )
-
             failure_conn.commit()
 
         finally:
@@ -210,5 +219,5 @@ def save_scan(
         raise
 
     finally:
-        # Close the original database connection.
-        conn.close()
+        if conn is not None:
+            conn.close()

@@ -1,16 +1,17 @@
 
 """
-Command-line application for the Smart File Intelligence System.
+Command-line entry point for the Smart File Intelligence System.
 
-This module connects directory scanning, SQLite storage, and
-read-only reporting through a simple command-line interface.
+Coordinates scanning, duplicate detection, database persistence,
+and storage reporting.
 """
 
 import argparse
 import sqlite3
 import sys
-from pathlib import Path
+import time
 
+from src.scanner import scan_directory, detect_duplicates
 from src.data_access.connection import initialize_database
 from src.data_access.scanner_service import save_scan
 from src.data_access.report_repo import (
@@ -25,21 +26,19 @@ def display_report(
     database_path: str | None = None,
 ) -> None:
     """
-    Display storage statistics for a completed scan.
+    Print the storage report for a scan.
 
     Args:
-        scan_id (int): Identifier of the scan to display.
+        scan_id (int): ID of the scan to display.
         database_path (str | None): Optional SQLite database path.
 
     Returns:
-        None: Prints the scan report to the terminal.
+        None: Prints the report to the terminal.
 
     Raises:
-        ValueError: If scan_id is invalid.
-        sqlite3.Error: If a database query fails.
+        ValueError: If the scan ID is invalid.
+        sqlite3.Error: If a reporting query fails.
     """
-
-    # Retrieve the summary for the requested scan.
     report = get_storage_report(
         scan_id=scan_id,
         database_path=database_path,
@@ -49,7 +48,6 @@ def display_report(
         print(f"No report found for scan {scan_id}.")
         return
 
-    # Display the overall storage statistics.
     print("\n=== Smart File Intelligence Report ===")
     print(f"Scan ID: {report.scan_id}")
     print(f"Total files: {report.file_count}")
@@ -59,7 +57,6 @@ def display_report(
     print(f"Duplicate files: {report.duplicate_file_count}")
     print(f"Potential savings: {report.potential_savings} bytes")
 
-    # Retrieve and display category-level storage usage.
     categories = get_storage_by_category(
         scan_id=scan_id,
         database_path=database_path,
@@ -83,35 +80,44 @@ def run_application(
     database_path: str | None = None,
 ) -> int:
     """
-    Initialize storage, scan a directory, and display its report.
-
-    When no directory is provided, display the latest completed
-    scan report instead.
+    Run a scan or display the latest completed scan.
 
     Args:
-        scan_path (str | None): Directory to scan, or None to show
-            the latest completed scan.
+        scan_path (str | None): Directory to scan, or None to
+            display the latest completed scan.
         database_path (str | None): Optional SQLite database path.
 
     Returns:
-        int: Zero on success, or one if an operation fails.
+        int: Zero on success and one on failure.
     """
-
     try:
-        # Ensure the SQLite database schema is initialized.
+        # Ensure database tables exist before saving scan results.
         initialize_database(database_path)
 
         if scan_path is not None:
-            # Scan the requested directory and save its results.
+            # Measure traversal and duplicate detection only.
+            start_time = time.perf_counter()
+
+            files = list(scan_directory(scan_path))
+            duplicate_result = detect_duplicates(files)
+
+            duration_seconds = round(
+                time.perf_counter() - start_time
+            )
+
+            # Save the already collected scanner results.
             scan_id = save_scan(
                 scan_path=scan_path,
+                files=files,
+                duplicate_result=duplicate_result,
+                duration_seconds=duration_seconds,
                 database_path=database_path,
             )
 
             print(f"Scan completed successfully. Scan ID: {scan_id}")
 
         else:
-            # Load the most recent completed scan.
+            # Display the latest completed scan without rescanning.
             latest_scan = get_latest_completed_scan(
                 database_path=database_path,
             )
@@ -122,7 +128,6 @@ def run_application(
 
             scan_id = latest_scan.scan_id
 
-        # Display the report for the selected scan.
         display_report(
             scan_id=scan_id,
             database_path=database_path,
@@ -130,46 +135,38 @@ def run_application(
 
         return 0
 
-    except (TypeError, ValueError, KeyError, sqlite3.Error, OSError) as error:
-        # Report expected input and database failures.
-        print(f"Error: {error}", file=sys.stderr)
-        return 1
-
     except Exception as error:
-        # Report unexpected scanner or integration failures.
-        print(f"Unexpected error: {error}", file=sys.stderr)
+        # Report failures without displaying a Python traceback.
+        print(f"Error: {error}", file=sys.stderr)
         return 1
 
 
 def main() -> int:
     """
-    Parse command-line arguments and start the application.
+    Parse command-line arguments and run the application.
 
     Returns:
         int: Application exit code.
     """
-
-    # Configure the command-line interface.
     parser = argparse.ArgumentParser(
-        description="Scan directories and report file storage statistics."
+        description="Scan directories and report storage statistics."
     )
 
     parser.add_argument(
         "scan_path",
         nargs="?",
         default=None,
-        help="Directory to scan. Omit to show the latest completed scan.",
+        help="Directory to scan; omit to show the latest report.",
     )
 
     parser.add_argument(
         "--database",
         default=None,
-        help="Optional path to the SQLite database.",
+        help="Optional SQLite database path.",
     )
 
     args = parser.parse_args()
 
-    # Start the application with the supplied arguments.
     return run_application(
         scan_path=args.scan_path,
         database_path=args.database,
