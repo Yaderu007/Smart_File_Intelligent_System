@@ -10,6 +10,9 @@ import argparse
 import sqlite3
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # Allow running from the project root.
 
 from src.scanner import scan_directory, detect_duplicates
 from src.data_access.connection import initialize_database
