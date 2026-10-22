@@ -32,12 +32,11 @@ def test_database(tmp_path, monkeypatch):
     # Save the original connection function before replacing it.
     original_get_connection = get_connection
 
-    # Redirect repository connections to our temporary database.
-    # This avoids changing the real smart_files.db.
+    # Use the test database unless an explicit path is provided.
     monkeypatch.setattr(
         scan_repo,
         "get_connection",
-        lambda: original_get_connection(database_path),
+        lambda path=None: original_get_connection(database_path if path is None else path),
     )
 
     monkeypatch.setattr(
@@ -105,6 +104,49 @@ def test_create_scan(test_database):
     assert scan.file_count == 0
     assert scan.total_size == 0
 
+def test_create_scan_with_custom_database_path(
+    test_database,
+):
+    """
+    Verify that create_scan saves a scan to a specified database.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when the scan is stored in
+            the specified SQLite database.
+    """
+
+    # Save the scan using an explicit database path.
+    scan_id = scan_repo.create_scan(
+        "/example/custom",
+        database_path=test_database,
+    )
+
+    # Open the same database independently to verify the record.
+    connection = get_connection(test_database)
+
+    try:
+        row = connection.execute(
+            """
+            SELECT scan_id, scan_path, status
+            FROM Scans
+            WHERE scan_id = ?
+            """,
+            (scan_id,),
+        ).fetchone()
+
+        assert row is not None
+        assert row["scan_id"] == scan_id
+        assert row["scan_path"] == "/example/custom"
+        assert row["status"] == "incomplete"
+
+    finally:
+        # Close the verification connection.
+        connection.close()
+
+
 
 def test_get_scan_returns_dataclass(test_database):
     """
@@ -128,6 +170,36 @@ def test_get_scan_returns_dataclass(test_database):
     assert scan.scan_id == scan_id
     assert scan.scan_path == "/example/photos"
     assert isinstance(scan.scan_timestamp, str)
+
+
+def test_get_scan_with_custom_database_path(test_database):
+    """
+    Verify that get_scan retrieves data from a specified database.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when the correct scan is returned.
+    """
+
+    # Create a scan in the temporary database.
+    scan_id = scan_repo.create_scan(
+        "/example/custom",
+        database_path=test_database,
+    )
+
+    # Retrieve the scan using the explicit database path.
+    scan = scan_repo.get_scan(
+        scan_id,
+        database_path=test_database,
+    )
+
+    assert isinstance(scan, Scan)
+    assert scan.scan_id == scan_id
+    assert scan.scan_path == "/example/custom"
+    assert scan.status == "incomplete"
+
 
 
 def test_update_scan(test_database):
@@ -181,6 +253,42 @@ def test_list_scans(test_database):
     assert all(isinstance(scan, Scan) for scan in scans)
 
     # Compare IDs without relying on timestamp ordering.
+    returned_ids = {scan.scan_id for scan in scans}
+
+    assert returned_ids == {first_id, second_id}
+
+
+def test_list_scans_with_custom_database_path(test_database):
+    """
+    Verify that list_scans reads from the specified database.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when both scans are returned.
+    """
+
+    # Create two scans in the temporary database.
+    first_id = scan_repo.create_scan(
+        "/example/first",
+        database_path=test_database,
+    )
+
+    second_id = scan_repo.create_scan(
+        "/example/second",
+        database_path=test_database,
+    )
+
+    # Retrieve scans using the explicit database path.
+    scans = scan_repo.list_scans(
+        database_path=test_database,
+    )
+
+    assert len(scans) == 2
+    assert all(isinstance(scan, Scan) for scan in scans)
+
+    # Check both IDs without relying on timestamps.
     returned_ids = {scan.scan_id for scan in scans}
 
     assert returned_ids == {first_id, second_id}
@@ -618,3 +726,110 @@ def test_save_scan_results_final_update_failure_rolls_back(
     finally:
         connection.close()
 
+
+
+def test_update_scan_with_custom_database_path(test_database):
+    """
+    Verify that update_scan uses the specified database.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when the scan is updated.
+    """
+
+    # Create a scan in the specified database.
+    scan_id = scan_repo.create_scan(
+        "/example/custom",
+        database_path=test_database,
+    )
+
+    # Update the scan using the same database path.
+    scan_repo.update_scan(
+        scan_id=scan_id,
+        file_count=3,
+        total_size=1500,
+        scan_duration=2,
+        status="completed",
+        database_path=test_database,
+    )
+
+    # Verify the updated values directly in SQLite.
+    connection = get_connection(test_database)
+
+    try:
+        row = connection.execute(
+            """
+            SELECT file_count, total_size, scan_duration, status
+            FROM Scans
+            WHERE scan_id = ?
+            """,
+            (scan_id,),
+        ).fetchone()
+
+        assert row is not None
+        assert row["file_count"] == 3
+        assert row["total_size"] == 1500
+        assert row["scan_duration"] == 2
+        assert row["status"] == "completed"
+
+    finally:
+        connection.close()
+
+
+def test_save_scan_results_with_custom_database_path(test_database):
+    """
+    Verify that scan results are saved to a specified database.
+
+    Args:
+        test_database (Path): Initialized temporary database.
+
+    Returns:
+        None: The test passes when the scan and files are saved.
+    """
+
+    files = [
+        make_file_metadata("/example/a.pdf", size=100),
+        make_file_metadata("/example/b.txt", size=200),
+    ]
+
+    # Save scan results using the explicit database path.
+    scan_id = scan_repo.save_scan_results(
+        "/example",
+        files,
+        database_path=test_database,
+    )
+
+    # Verify the completed scan.
+    scan = scan_repo.get_scan(
+        scan_id,
+        database_path=test_database,
+    )
+
+    assert scan is not None
+    assert scan.status == "completed"
+    assert scan.file_count == 2
+    assert scan.total_size == 300
+
+    # Verify both files were saved in the same database.
+    connection = get_connection(test_database)
+
+    try:
+        rows = connection.execute(
+            """
+            SELECT path
+            FROM Files
+            WHERE scan_id = ?
+            ORDER BY path
+            """,
+            (scan_id,),
+        ).fetchall()
+
+        assert [row["path"] for row in rows] == [
+            "/example/a.pdf",
+            "/example/b.txt",
+        ]
+
+    finally:
+        connection.close()
