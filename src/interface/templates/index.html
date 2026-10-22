@@ -1,10 +1,21 @@
 
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart File Intelligence</title>
+    <script>
+(function () {
+    try {
+        var saved = localStorage.getItem("sfi-theme");
+        var preferred = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.dataset.theme = saved || preferred;
+    } catch (error) {
+        document.documentElement.dataset.theme = "light";
+    }
+})();
+</script>
     
     <link
         rel="stylesheet"
@@ -22,10 +33,12 @@
         </div>
 
         <nav>
-            <a class="nav-link active" href="/">Overview</a>
+            <a class="nav-link active" href="{{ url_for('dashboard', scan_id=selected_scan.scan_id if selected_scan else None) }}">Overview</a>
             <a class="nav-link" href="#categories">File categories</a>
+            <a class="nav-link" href="#duplicates">Duplicate files</a>
             <a class="nav-link" href="#largest-files">Largest files</a>
         </nav>
+        
 
         <div class="sidebar-footer">
             <span class="status-dot"></span>
@@ -37,12 +50,17 @@
     <main class="main-content">
         
         <header class="topbar">
-            <div>
-                <p class="eyebrow">FILE MANAGEMENT</p>
+            <div class="page-title">
                 <h1>Dashboard</h1>
-                <p class="subtitle">
-                    Understand your files and storage at a glance.
-                </p>
+                <p class="subtitle">Storage intelligence at a glance</p>
+            </div>
+            <div class="topbar-tools">
+                <label class="search-box" for="dashboard-search"><span aria-hidden="true">⌕</span><input id="dashboard-search" type="search" placeholder="Search files, paths, or categories..." autocomplete="off"></label>
+                <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Switch to dark mode" title="Toggle light and dark mode"><span class="theme-icon" aria-hidden="true">☾</span><span class="theme-label">Dark mode</span></button>
+            </div>
+            <div class="legacy-title" hidden>
+                <p class="eyebrow">FILE MANAGEMENT</p>
+                <p class="subtitle">Understand your files and storage at a glance.</p>
             </div>
 
 
@@ -55,7 +73,7 @@
                     placeholder="/home/ahmed/Documents"
                     required
                 >
-                <button type="submit">New Scan</button>
+                <button type="submit"><span aria-hidden="true">＋</span> Scan Directory</button>
             </form>
 
 
@@ -90,17 +108,7 @@
             {% endfor %}
         {% endwith %}
 
-        <section class="welcome-panel">
-            <div>
-                <p class="eyebrow">YOUR STORAGE OVERVIEW</p>
-                <h2>Your files, made understandable.</h2>
-                <p>
-                    Scan a directory to discover file types, storage usage,
-                    large files and potential duplicates.
-                </p>
-            </div>
-            <div class="welcome-symbol">⌕</div>
-        </section>
+
 
 
         <section class="stats-grid" aria-label="Storage statistics">
@@ -117,14 +125,14 @@
             </article>
 
             <article class="stat-card">
-                <p>Average file size</p>
-                <h2>{{ format_bytes(average_size) }}</h2>
-                <span>Average of known file sizes</span>
+                <p>Duplicate files</p>
+                <h2>{{ duplicate_groups | sum(attribute='count') if duplicate_groups else 0 }}</h2>
+                <span>Files in detected duplicate groups</span>
             </article>
 
             <article class="stat-card">
                 <p>Potential savings</p>
-                <h2>—</h2>
+                <h2>{{ format_bytes(potential_savings) }}</h2>
                 <span>From duplicate files</span>
             </article>
         </section>
@@ -171,6 +179,61 @@
                 {% endif %}
             </article>
 
+            <!-- Duplicate analysis -->
+            <article class="panel" id="duplicates">
+                <div class="panel-heading">
+                    <div>
+                        <h3>Duplicate files</h3>
+                        <p>Identify redundant copies and potential storage savings.</p>
+                    </div>
+
+                    {% if selected_scan %}
+                    <a
+                        class="secondary-button panel-action"
+                        href="{{ url_for('duplicates', scan_id=selected_scan.scan_id) }}"
+                    >
+                        View full →
+                    </a>
+                    {% endif %}
+                </div>
+
+                {% if duplicate_groups %}
+                <div class="duplicate-list">
+                    {% for group in duplicate_groups %}
+                    <details class="duplicate-row">
+                        <summary>
+                            <div class="duplicate-info">
+                                <strong>{{ group.name }}</strong>
+                                <span>{{ group.count }} identical files</span>
+                            </div>
+
+                            <div class="duplicate-savings">
+                                <strong>{{ format_bytes(group.savings) }}</strong>
+                                <span>Potential savings</span>
+                            </div>
+                        </summary>
+
+                        <div class="duplicate-paths">
+                            {% for path in group.files %}
+                            <p>{{ path }}</p>
+                            {% endfor %}
+                        </div>
+                    </details>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="empty-state">
+                    <div class="empty-icon">⧉</div>
+                    <h4>No duplicate groups available</h4>
+                    <p>
+                        Duplicate results will appear here after duplicate detection
+                        has run and its results have been saved.
+                    </p>
+                </div>
+                {% endif %}
+            </article>
+
+
             <article class="panel" id="largest-files">
                 <div class="panel-heading">
                     <div>
@@ -201,6 +264,9 @@
                 </div>
                 {% endif %}
             </article>
+
+                        
+
         </section>
 
 
