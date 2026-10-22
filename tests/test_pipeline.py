@@ -1,72 +1,242 @@
-"""B7: full pipeline integration test — scan, save, read back, verify."""
+
+"""
+Test the complete scanner-to-database integration pipeline.
+
+These tests verify that the scanner output passes through
+duplicate detection, database persistence, and reporting.
+"""
 
 import pytest
-from src.scanner import scan_directory, detect_duplicates
-from src.data_access.connection import initialize_database
-from src.data_access.scan_repo import save_scan, get_scan
-from src.data_access.file_repo import get_files_by_scan, get_total_storage
-from src.data_access.duplicate_repo import get_duplicate_groups, get_duplicate_members
-from src.data_access.report_repo import get_storage_by_category, get_storage_report
+
+from src.data_access.connection import (
+    get_connection,
+    initialize_database,
+)
+from src.main import run_application
 
 
 @pytest.fixture
-def db_path(tmp_path):
-    path = tmp_path / "test.db"
-    initialize_database(str(path))
-    return str(path)
+def test_database(tmp_path):
+    """
+    Create a fresh SQLite database for each pipeline test.
+
+    Args:
+        tmp_path (Path): Temporary directory provided by pytest.
+
+    Returns:
+        Path: Path to the initialized test database.
+    """
+    database_path = tmp_path / "pipeline.db"
+    initialize_database(database_path)
+    return database_path
 
 
-@pytest.fixture
-def sample_directory(tmp_path):
-    scan_dir = tmp_path / "scan_me"
-    scan_dir.mkdir()
-    (scan_dir / "dup1.txt").write_text("identical content, twice")
-    (scan_dir / "dup2.txt").write_text("identical content, twice")
-    (scan_dir / "unique.txt").write_text("nothing else looks like this one")
-    (scan_dir / "photo.jpg").write_bytes(b"\xff\xd8\xff" * 50)
-    return scan_dir
+def test_pipeline_saves_files_and_duplicates(
+    tmp_path,
+    test_database,
+    capsys,
+):
+    """
+    Verify scanning, duplicate detection, persistence, and reporting.
+
+    Args:
+        tmp_path (Path): Temporary directory provided by pytest.
+        test_database (Path): Initialized SQLite database.
+        capsys (pytest.CaptureFixture): Captures terminal output.
+
+    Returns:
+        None: Assertions verify the complete pipeline.
+    """
+    scan_directory = tmp_path / "documents"
+    scan_directory.mkdir()
+
+    # Create two duplicate files and one unique file.
+    first = scan_directory / "first.txt"
+    second = scan_directory / "second.txt"
+    unique = scan_directory / "unique.txt"
+
+    first.write_text("Identical content")
+    second.write_text("Identical content")
+    unique.write_text("Different content")
+
+    # Run the real scanner, duplicate detector, and database layer.
+    result = run_application(
+        scan_path=str(scan_directory),
+        database_path=str(test_database),
+    )
+
+    assert result == 0
+
+    output = capsys.readouterr().out
+
+    assert "Scan completed successfully" in output
+    assert "Smart File Intelligence Report" in output
+
+    connection = get_connection(test_database)
+
+    try:
+        # Verify the scan completed with the expected statistics.
+        scan = connection.execute(
+            "SELECT * FROM Scans"
+        ).fetchone()
+
+        assert scan is not None
+        assert scan["status"] == "completed"
+        assert scan["file_count"] == 3
+        assert scan["total_size"] == sum(
+            path.stat().st_size
+            for path in (first, second, unique)
+        )
+        assert isinstance(scan["scan_duration"], int)
+        assert scan["scan_duration"] >= 0
+
+        # Verify all scanned files were saved.
+        files = connection.execute(
+            "SELECT * FROM Files WHERE scan_id = ?",
+            (scan["scan_id"],),
+        ).fetchall()
+
+        assert len(files) == 3
+
+        # Verify duplicate detection produced one group.
+        groups = connection.execute(
+            "SELECT * FROM DuplicateGroups WHERE scan_id = ?",
+            (scan["scan_id"],),
+        ).fetchall()
+
+        assert len(groups) == 1
+        assert groups[0]["duplicate_count"] == 2
+        assert groups[0]["potential_savings"] == first.stat().st_size
+
+        # Verify that the first sorted path is the primary member.
+        members = connection.execute(
+            """
+            SELECT f.path, dm.is_primary
+            FROM DuplicateMembers AS dm
+            JOIN Files AS f ON f.file_id = dm.file_id
+            WHERE dm.group_id = ?
+            ORDER BY f.path
+            """,
+            (groups[0]["group_id"],),
+        ).fetchall()
+
+        assert len(members) == 2
+        assert members[0]["path"] == str(first)
+        assert members[0]["is_primary"] == 1
+        assert members[1]["path"] == str(second)
+        assert members[1]["is_primary"] == 0
+
+        # Verify that duplicate candidates have saved hashes.
+        hashes = connection.execute(
+            """
+            SELECT fh.hash_algorithm
+            FROM FileHashes AS fh
+            JOIN Files AS f ON f.file_id = fh.file_id
+            WHERE f.scan_id = ?
+            """,
+            (scan["scan_id"],),
+        ).fetchall()
+
+        assert len(hashes) == 3
+        assert all(
+            row["hash_algorithm"] == "sha256"
+            for row in hashes
+        )
+
+    finally:
+        connection.close()
 
 
-def test_full_pipeline_end_to_end(sample_directory, db_path):
-    files = list(scan_directory(sample_directory))
-    result = detect_duplicates(files)
-    scan_id = save_scan(str(sample_directory), files, result, duration_seconds=1,
-                         database_path=db_path)
+def test_pipeline_handles_empty_directory(
+    tmp_path,
+    test_database,
+):
+    """
+    Verify that scanning an empty directory completes successfully.
 
-    scan = get_scan(scan_id, database_path=db_path)
-    assert scan.status == "completed"
-    assert scan.file_count == 4
+    Args:
+        tmp_path (Path): Temporary directory provided by pytest.
+        test_database (Path): Initialized SQLite database.
 
-    stored = get_files_by_scan(scan_id, database_path=db_path)
-    assert len(stored) == 4
+    Returns:
+        None: Assertions verify zero file counts and storage.
+    """
+    empty_directory = tmp_path / "empty"
+    empty_directory.mkdir()
 
-    expected_total = sum(len(f.read_bytes()) for f in sample_directory.iterdir())
-    assert get_total_storage(scan_id, database_path=db_path) == expected_total
+    result = run_application(
+        scan_path=str(empty_directory),
+        database_path=str(test_database),
+    )
 
-    groups = get_duplicate_groups(scan_id, database_path=db_path)
-    assert len(groups) == 1
-    assert groups[0].duplicate_count == 2
-    assert groups[0].potential_savings == len("identical content, twice")
+    assert result == 0
 
-    members = get_duplicate_members(groups[0].group_id, database_path=db_path)
-    primaries = [m for m in members if m["is_primary"]]
-    assert len(primaries) == 1
-    assert primaries[0]["name"] == "dup1.txt"
+    connection = get_connection(test_database)
 
-    report = get_storage_report(scan_id, database_path=db_path)
-    assert report["file_count"] == 4
-    assert report["duplicate_groups"] == 1
+    try:
+        scan = connection.execute(
+            "SELECT * FROM Scans"
+        ).fetchone()
+
+        assert scan is not None
+        assert scan["status"] == "completed"
+        assert scan["file_count"] == 0
+        assert scan["total_size"] == 0
+
+    finally:
+        connection.close()
 
 
-def test_scan_with_no_duplicates_still_completes(tmp_path, db_path):
-    scan_dir = tmp_path / "no_dupes"
-    scan_dir.mkdir()
-    (scan_dir / "only_one.txt").write_text("nothing to duplicate here")
+def test_pipeline_reports_latest_completed_scan(
+    tmp_path,
+    test_database,
+    capsys,
+):
+    """
+    Verify that an existing scan can be reported without rescanning.
 
-    files = list(scan_directory(scan_dir))
-    result = detect_duplicates(files)
-    scan_id = save_scan(str(scan_dir), files, result, database_path=db_path)
+    Args:
+        tmp_path (Path): Temporary directory provided by pytest.
+        test_database (Path): Initialized SQLite database.
+        capsys (pytest.CaptureFixture): Captures terminal output.
 
-    scan = get_scan(scan_id, database_path=db_path)
-    assert scan.status == "completed"
-    assert get_duplicate_groups(scan_id, database_path=db_path) == []
+    Returns:
+        None: Assertions verify the existing report is displayed.
+    """
+    scan_directory = tmp_path / "documents"
+    scan_directory.mkdir()
+
+    (scan_directory / "example.txt").write_text("Example content")
+
+    # Create the first completed scan.
+    assert run_application(
+        scan_path=str(scan_directory),
+        database_path=str(test_database),
+    ) == 0
+
+    capsys.readouterr()
+
+    # Omit the path to request the latest completed report.
+    result = run_application(
+        database_path=str(test_database),
+    )
+
+    assert result == 0
+
+    output = capsys.readouterr().out
+
+    assert "Smart File Intelligence Report" in output
+    assert "Total files: 1" in output
+
+    connection = get_connection(test_database)
+
+    try:
+        # Reporting an existing scan must not create a new scan.
+        count = connection.execute(
+            "SELECT COUNT(*) FROM Scans"
+        ).fetchone()[0]
+
+        assert count == 1
+
+    finally:
+        connection.close()
