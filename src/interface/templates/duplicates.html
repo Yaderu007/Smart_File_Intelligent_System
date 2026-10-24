@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0d3030">
+    <title>Duplicate Files | Smart File Intelligence</title>
+    <script>
+        (function () {
+            try {
+                var saved = localStorage.getItem("sfi-theme");
+                var preferred = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+                document.documentElement.dataset.theme = saved || preferred;
+            } catch (error) {
+                document.documentElement.dataset.theme = "light";
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <aside class="sidebar">
+        <a class="brand" href="{{ url_for('dashboard', scan_id=selected_scan.scan_id) }}" aria-label="Smart File Intelligence home">
+            <span class="brand-icon" aria-hidden="true">SFI</span>
+            <span class="brand-copy"><strong>Smart File</strong><span>Intelligence</span></span>
+        </a>
+
+        <nav class="primary-nav" aria-label="Main navigation">
+            <a class="nav-link" href="{{ url_for('dashboard', scan_id=selected_scan.scan_id) }}">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m3.5 10 8.5-7 8.5 7v10.5H14v-6h-4v6H3.5z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+                <span>Overview</span>
+            </a>
+            <a class="nav-link active" href="{{ url_for('duplicates', scan_id=selected_scan.scan_id) }}" aria-current="page">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.7"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8" stroke="currentColor" stroke-width="1.7"/></svg>
+                <span>Duplicate files</span>
+            </a>
+        </nav>
+
+        <div class="sidebar-footer"><span class="status-dot" aria-hidden="true"></span><span>Local analysis</span><small>Your files stay on this device.</small></div>
+    </aside>
+
+    <main class="main-content main-content-wide">
+        <a class="back-link" href="{{ url_for('dashboard', scan_id=selected_scan.scan_id) }}"><span aria-hidden="true">←</span> Back to dashboard</a>
+
+        <header class="topbar duplicate-topbar">
+            <div class="page-title">
+                <p class="eyebrow">FILE MANAGEMENT</p>
+                <h1>Duplicate files</h1>
+                <p class="subtitle">Review identical files and estimate recoverable storage.</p>
+            </div>
+            <div class="topbar-actions">
+                <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Switch theme" title="Toggle light and dark mode">
+                    <span class="theme-icon" aria-hidden="true">◐</span>
+                    <span class="theme-label">Dark mode</span>
+                </button>
+            </div>
+        </header>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% for category, message in messages %}<div class="flash-message {{ category }}" role="status">{{ message }}</div>{% endfor %}
+        {% endwith %}
+
+        <section class="welcome-panel">
+            <div>
+                <p class="eyebrow">DUPLICATE REPORT</p>
+                <h2>Find redundant copies.</h2>
+                <p>Review each duplicate group and its file locations. Potential savings assume that one copy of each group is retained.</p>
+            </div>
+            <div class="welcome-symbol" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/></svg></div>
+        </section>
+
+        <section class="report-summary" aria-label="Duplicate statistics">
+            <article class="report-stat"><span class="report-stat-icon" aria-hidden="true">⧉</span><p>Duplicate groups</p><strong>{{ total_duplicate_groups }}</strong></article>
+            <article class="report-stat"><span class="report-stat-icon" aria-hidden="true">▤</span><p>Files in duplicate groups</p><strong>{{ total_duplicate_files }}</strong></article>
+            <article class="report-stat"><span class="report-stat-icon" aria-hidden="true">↗</span><p>Potential savings</p><strong>{{ format_bytes(potential_savings) }}</strong></article>
+        </section>
+
+        <section class="panel duplicates-report-panel">
+            <div class="panel-heading">
+                <div><p class="section-kicker">SCAN #{{ selected_scan.scan_id }}</p><h3>All duplicate groups</h3><p>Expand a group to inspect the file locations included in it.</p></div>
+            </div>
+
+            {% if duplicate_details %}
+                <div class="duplicate-list">
+                    {% for detail in duplicate_details %}
+                        <details class="duplicate-row">
+                            <summary>
+                                <span class="duplicate-summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/></svg></span>
+                                <div class="duplicate-info"><strong>{{ detail.name }}</strong><span>{{ detail.group.duplicate_count }} files in this group</span></div>
+                                <div class="duplicate-savings"><strong>{{ format_bytes(detail.group.potential_savings) }}</strong><span>Potential savings</span></div>
+                                <span class="disclosure-chevron" aria-hidden="true">⌄</span>
+                            </summary>
+                            <div class="duplicate-paths">
+                                {% for file in detail.files %}
+                                    <div class="duplicate-path"><span class="duplicate-path-marker" aria-hidden="true">↳</span><span class="duplicate-path-text">{{ file.path }}</span></div>
+                                {% endfor %}
+                            </div>
+                        </details>
+                    {% endfor %}
+                </div>
+                <p class="report-note">Potential savings are estimates. No files have been deleted or modified.</p>
+            {% else %}
+                <div class="empty-state"><span class="empty-icon" aria-hidden="true">⧉</span><h4>No duplicate groups available</h4><p>This scan has no saved duplicate-analysis results. Run a scan with duplicate detection enabled to populate this report.</p></div>
+            {% endif %}
+        </section>
+
+        <footer class="page-footer"><span>Smart File Intelligence</span><span>Local-first file analysis</span></footer>
+    </main>
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}" defer></script>
+</body>
+</html>

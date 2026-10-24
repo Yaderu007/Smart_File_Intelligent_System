@@ -1,220 +1,237 @@
-
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Smart File Intelligence</title>
-    
-    <link
-        rel="stylesheet"
-        href="{{ url_for('static', filename='css/style.css') }}"
-    >
+    <meta name="theme-color" content="#0d3030">
+    <title>Dashboard | Smart File Intelligence</title>
+    <script>
+        (function () {
+            try {
+                var saved = localStorage.getItem("sfi-theme");
+                var preferred = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+                document.documentElement.dataset.theme = saved || preferred;
+            } catch (error) {
+                document.documentElement.dataset.theme = "light";
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
     <aside class="sidebar">
-        <div class="brand">
-            <div class="brand-icon">S</div>
-            <div>
-                <h2>SmartFile</h2>
-                <p>Intelligence System</p>
-            </div>
-        </div>
+        <a class="brand" href="{{ url_for('dashboard', scan_id=selected_scan.scan_id if selected_scan else None) }}" aria-label="Smart File Intelligence home">
+            <span class="brand-icon" aria-hidden="true">SFI</span>
+            <span class="brand-copy">
+                <strong>Smart File</strong>
+                <span>Intelligence</span>
+            </span>
+        </a>
 
-        <nav>
-            <a class="nav-link active" href="/">Overview</a>
-            <a class="nav-link" href="#categories">File categories</a>
-            <a class="nav-link" href="#largest-files">Largest files</a>
+        <nav class="primary-nav" aria-label="Main navigation">
+            <a class="nav-link active" href="{{ url_for('dashboard', scan_id=selected_scan.scan_id if selected_scan else None) }}" aria-current="page">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m3.5 10 8.5-7 8.5 7v10.5H14v-6h-4v6H3.5z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+                <span>Overview</span>
+            </a>
+            <a class="nav-link" href="{{ url_for('duplicates', scan_id=selected_scan.scan_id) if selected_scan else url_for('dashboard') }}">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.7"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8" stroke="currentColor" stroke-width="1.7"/></svg>
+                <span>Duplicate files</span>
+            </a>
         </nav>
 
         <div class="sidebar-footer">
-            <span class="status-dot"></span>
-            Local analysis
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>Local analysis</span>
+            <small>Your files stay on this device.</small>
         </div>
     </aside>
 
-    
-    <main class="main-content">
-        
+    <main class="main-content with-section-nav">
         <header class="topbar">
-            <div>
-                <p class="eyebrow">FILE MANAGEMENT</p>
+            <div class="page-title">
+                <p class="eyebrow">STORAGE WORKSPACE</p>
                 <h1>Dashboard</h1>
-                <p class="subtitle">
-                    Understand your files and storage at a glance.
-                </p>
+                <p class="subtitle">Storage intelligence at a glance.</p>
             </div>
-
-
-            <form action="{{ url_for('start_scan') }}" method="post" class="scan-selector">
-                <label for="scan_path">Directory to scan</label>
-                <input
-                    type="text"
-                    id="scan_path"
-                    name="scan_path"
-                    placeholder="/home/ahmed/Documents"
-                    required
-                >
-                <button type="submit">New Scan</button>
-            </form>
-
-
-            <form method="get" action="/" class="scan-selector">
-                <label for="scan_id">Selected scan</label>
-                <select
-                    id="scan_id"
-                    name="scan_id"
-                    onchange="this.form.submit()"
-                    {% if not scans %}disabled{% endif %}
-                >
-                    {% for scan in scans %}
-                    <option
-                        value="{{ scan.scan_id }}"
-                        {% if selected_scan and scan.scan_id == selected_scan.scan_id %}
-                        selected
-                        {% endif %}
-                    >
-                        Scan #{{ scan.scan_id }} — {{ scan.scan_path }}
-                    </option>
-                    {% endfor %}
-                </select>
-            </form>
+            <div class="topbar-actions">
+                <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Switch theme" title="Toggle light and dark mode">
+                    <span class="theme-icon" aria-hidden="true">◐</span>
+                    <span class="theme-label">Dark mode</span>
+                </button>
+            </div>
         </header>
 
+        <section class="scan-toolbar" aria-label="Scan controls">
+            <form action="{{ url_for('start_scan') }}" method="post" class="scan-selector scan-directory-form">
+                <div class="control-heading">
+                    <label for="scan_path">Scan a directory</label>
+                    <span class="control-hint">Analyse files in a folder on this device</span>
+                </div>
+                <div class="directory-input-row">
+                    <svg class="directory-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4l2 2h6a2.5 2.5 0 0 1 2.5 2.5v7A2.5 2.5 0 0 1 18 19H6a2.5 2.5 0 0 1-2.5-2.5z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M3.8 10h16.4" stroke="currentColor" stroke-width="1.7"/></svg>
+                    <input type="text" id="scan_path" name="scan_path" placeholder="/home/you/Documents" autocomplete="off" required aria-describedby="scan-path-hint">
+                    <button type="submit" class="primary-button scan-button"><span aria-hidden="true">＋</span> Scan directory</button>
+                </div>
+                <p class="field-hint" id="scan-path-hint">Enter the full path of the folder you want to analyse.</p>
+            </form>
+
+            <form method="get" action="{{ url_for('dashboard') }}" class="scan-selector scan-history-form">
+                <div class="control-heading">
+                    <label for="scan_id">Scan history</label>
+                    <span class="control-hint">Choose a saved report</span>
+                </div>
+                <div class="select-wrap">
+                    <svg class="select-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.7"/><path d="M12 7v5l3.2 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+                    <select id="scan_id" name="scan_id" onchange="this.form.submit()" {% if not scans %}disabled{% endif %}>
+                        {% if not scans %}
+                            <option value="">No saved scans yet</option>
+                        {% else %}
+                            {% for scan in scans %}
+                                <option value="{{ scan.scan_id }}" {% if selected_scan and scan.scan_id == selected_scan.scan_id %}selected{% endif %}>
+                                    Scan #{{ scan.scan_id }} — {{ scan.scan_path }}
+                                </option>
+                            {% endfor %}
+                        {% endif %}
+                    </select>
+                </div>
+                {% if selected_scan %}<p class="field-hint">Showing results from scan #{{ selected_scan.scan_id }}.</p>{% else %}<p class="field-hint">Run your first scan to get started.</p>{% endif %}
+            </form>
+        </section>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% for category, message in messages %}
-                <div class="flash-message {{ category }}" role="status">
-                    {{ message }}
-                </div>
+                <div class="flash-message {{ category }}" role="status">{{ message }}</div>
             {% endfor %}
         {% endwith %}
 
-        <section class="welcome-panel">
-            <div>
-                <p class="eyebrow">YOUR STORAGE OVERVIEW</p>
-                <h2>Your files, made understandable.</h2>
-                <p>
-                    Scan a directory to discover file types, storage usage,
-                    large files and potential duplicates.
-                </p>
-            </div>
-            <div class="welcome-symbol">⌕</div>
-        </section>
-
-
         <section class="stats-grid" aria-label="Storage statistics">
             <article class="stat-card">
-                <p>Total files</p>
+                <div class="stat-card-top"><p>Total files</p><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M7 3.5h7l4 4V20H7z"/><path d="M14 3.5v4h4M9.5 12h5M9.5 15.5h5"/></svg></span></div>
                 <h2>{{ selected_scan.file_count if selected_scan else 0 }}</h2>
                 <span>In the selected scan</span>
             </article>
-
             <article class="stat-card">
-                <p>Total storage</p>
+                <div class="stat-card-top"><p>Total storage</p><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="M3.5 10h17M7.5 15.5h.01M11 15.5h.01"/></svg></span></div>
                 <h2>{{ format_bytes(total_storage) }}</h2>
                 <span>Across scanned files</span>
             </article>
-
             <article class="stat-card">
-                <p>Average file size</p>
-                <h2>{{ format_bytes(average_size) }}</h2>
-                <span>Average of known file sizes</span>
+                <div class="stat-card-top"><p>Duplicate files</p><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/><path d="M11 12h6M11 15h4"/></svg></span></div>
+                <h2>{{ total_duplicate_files }}</h2>
+                <span>Files in detected duplicate groups</span>
             </article>
-
             <article class="stat-card">
-                <p>Potential savings</p>
-                <h2>—</h2>
-                <span>From duplicate files</span>
+                <div class="stat-card-top"><p>Potential savings</p><span class="stat-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M19.5 4.5c-7 0-12 2.2-12 7.3a5.7 5.7 0 0 0 5.7 5.7c5.1 0 6.3-6 6.3-13z"/><path d="M4 20c2.5-4.5 6-7.5 11-10"/></svg></span></div>
+                <h2>{{ format_bytes(potential_savings) }}</h2>
+                <span>Estimated duplicate storage</span>
             </article>
         </section>
 
-        <section class="content-grid">
-            <article class="panel" id="categories">
+        <nav class="section-jump" aria-label="Jump to dashboard section">
+            <p class="section-jump-label">ON THIS PAGE</p>
+            <a href="#categories" class="section-jump-link active" aria-current="location"><span class="jump-number">01</span><span class="jump-copy">Storage by category</span><span class="jump-arrow" aria-hidden="true">↗</span></a>
+            <a href="#largest-categories" class="section-jump-link"><span class="jump-number">02</span><span class="jump-copy">Largest file categories</span><span class="jump-arrow" aria-hidden="true">↗</span></a>
+            <a href="#largest-files" class="section-jump-link"><span class="jump-number">03</span><span class="jump-copy">Largest files</span><span class="jump-arrow" aria-hidden="true">↗</span></a>
+            <a href="#duplicates" class="section-jump-link"><span class="jump-number">04</span><span class="jump-copy">Duplicate files</span><span class="jump-arrow" aria-hidden="true">↗</span></a>
+        </nav>
+
+        <div class="dashboard-sections">
+            <section class="panel dashboard-section" id="categories" aria-labelledby="categories-title">
                 <div class="panel-heading">
                     <div>
-                        <h3>Storage by category</h3>
-                        <p>See where your storage is going.</p>
+                        <p class="section-kicker">01 / STORAGE BREAKDOWN</p>
+                        <h3 id="categories-title">Storage by category</h3>
+                        <p>See how your scanned storage is distributed across file types.</p>
                     </div>
-
-                    <div class="chart-container">
-                        <canvas id="storageCategoryChart"
-                                aria-label="Doughnut chart showing storage by file category"
-                                role="img"></canvas>
-                    </div>
-
-                    <script id="category-chart-data" type="application/json">
-                        {{ category_stats | tojson }}
-                    </script>
+                    <span class="panel-heading-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5H12z"/><path d="M15 3.9a8.5 8.5 0 0 1 5.1 5.1H15z"/></svg></span>
                 </div>
+                <div class="category-chart-layout">
+                    <div class="chart-container"><div class="donut-chart" id="storageCategoryChart" role="img" aria-label="Doughnut chart showing storage by file category"><div class="donut-center"><strong>{{ format_bytes(total_storage) }}</strong><span>Total used</span></div></div></div>
+                    <script id="category-chart-data" type="application/json">{{ category_stats | tojson }}</script>
+                    {% if category_stats %}
+                    <div class="category-list">
+                        {% for category, stats in category_stats.items() %}
+                        <div class="category-row">
+                            <span class="category-swatch" data-category-index="{{ loop.index0 }}" aria-hidden="true"></span>
+                            <div class="category-row-main"><div class="category-row-heading"><strong>{{ category }}</strong><span>{{ stats.file_count }} files</span></div><div class="category-size">{{ format_bytes(stats.total_size) }}</div></div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="empty-state"><span class="empty-icon" aria-hidden="true">◌</span><h4>No report yet</h4><p>Category statistics will appear after a scan.</p></div>
+                    {% endif %}
+                </div>
+            </section>
 
-                {% if category_stats %}
-                <div class="category-list">
-                    {% for category, stats in category_stats.items() %}
-                    <div class="category-row">
-                        <div class="category-row-heading">
-                            <strong>{{ category }}</strong>
-                            <span>{{ stats.file_count }} files</span>
-                        </div>
-                        <div class="category-size">
-                            {{ format_bytes(stats.total_size) }}
-                        </div>
+            <section class="panel dashboard-section" id="largest-categories" aria-labelledby="largest-categories-title">
+                <div class="panel-heading">
+                    <div>
+                        <p class="section-kicker">02 / CATEGORY OUTLIERS</p>
+                        <h3 id="largest-categories-title">Largest file categories</h3>
+                        <p>Each bar shows the largest file as a share of the storage used by its own category.</p>
+                    </div>
+                    <span class="panel-heading-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-4 3 2 5-6"/><path d="M15.5 7H19v3.5"/></svg></span>
+                </div>
+                {% if largest_category_stats %}
+                <div class="largest-category-list">
+                    {% for item in largest_category_stats %}
+                    <div class="largest-category-row">
+                        <div class="largest-category-label"><strong>{{ item.category }}</strong><span>{{ format_bytes(item.largest_size) }} of {{ format_bytes(item.total_size) }}</span></div>
+                        <div class="progress-track" role="progressbar" aria-label="{{ item.category }} largest file share" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ item.percentage|round|int }}"><span style="width: {{ item.percentage }}%"></span></div>
+                        <strong class="progress-percent">{{ "%.1f"|format(item.percentage) }}%</strong>
                     </div>
                     {% endfor %}
                 </div>
+                <p class="panel-footnote">Calculation: largest individual file in category ÷ total size of that same category.</p>
                 {% else %}
-                <div class="empty-state">
-                    <div class="empty-icon">▦</div>
-                    <h4>No report yet</h4>
-                    <p>Category statistics will appear after a scan.</p>
-                </div>
+                <div class="empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h4>No category data yet</h4><p>Run a scan to compare each category’s largest file with its total storage.</p></div>
                 {% endif %}
-            </article>
+            </section>
 
-            <article class="panel" id="largest-files">
+            <section class="panel dashboard-section" id="largest-files" aria-labelledby="largest-files-title">
                 <div class="panel-heading">
-                    <div>
-                        <h3>Largest files</h3>
-                        <p>Your biggest files, ranked by size.</p>
-                    </div>
+                    <div><p class="section-kicker">03 / BIGGEST ITEMS</p><h3 id="largest-files-title">Largest files</h3><p>Your five biggest individual files, ranked by size.</p></div>
+                    <span class="panel-heading-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M7 20V11M12 20V4M17 20v-6"/><path d="M4 20h16"/></svg></span>
                 </div>
-
                 {% if largest_files %}
                 <div class="file-list">
                     {% for file in largest_files %}
                     <div class="file-row">
-                        <div class="file-info">
-                            <strong>{{ file.name }}</strong>
-                            <span>{{ file.category }} · {{ file.path }}</span>
-                        </div>
-                        <span class="file-size">
-                            {{ format_bytes(file.size) }}
-                        </span>
+                        <span class="file-row-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M7 3.5h7l4 4V20H7z"/><path d="M14 3.5v4h4"/></svg></span>
+                        <div class="file-info"><strong>{{ file.name }}</strong><span>{{ file.category }} <span class="path-separator">·</span> {{ file.path }}</span></div>
+                        <span class="file-size">{{ format_bytes(file.size) }}</span>
                     </div>
                     {% endfor %}
                 </div>
                 {% else %}
-                <div class="empty-state">
-                    <div class="empty-icon">↗</div>
-                    <h4>Nothing to display yet</h4>
-                    <p>Your largest files will appear here.</p>
-                </div>
+                <div class="empty-state"><span class="empty-icon" aria-hidden="true">⇧</span><h4>Nothing to display yet</h4><p>Your largest files will appear here after a scan.</p></div>
                 {% endif %}
-            </article>
-        </section>
+            </section>
 
+            <section class="panel dashboard-section" id="duplicates" aria-labelledby="duplicates-title">
+                <div class="panel-heading">
+                    <div><p class="section-kicker">04 / CLEAN UP</p><h3 id="duplicates-title">Duplicate files</h3><p>Review repeated files and estimate recoverable storage.</p></div>
+                    {% if selected_scan %}<a class="secondary-button panel-action" href="{{ url_for('duplicates', scan_id=selected_scan.scan_id) }}">View all duplicates <span aria-hidden="true">→</span></a>{% endif %}
+                </div>
+                {% if duplicate_groups %}
+                <div class="duplicate-list">
+                    {% for group in duplicate_groups %}
+                    <details class="duplicate-row">
+                        <summary><span class="duplicate-summary-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/></svg></span><div class="duplicate-info"><strong>{{ group.name }}</strong><span>{{ group.count }} files in this group</span></div><div class="duplicate-savings"><strong>{{ format_bytes(group.savings) }}</strong><span>Potential savings</span></div><span class="disclosure-chevron" aria-hidden="true">⌄</span></summary>
+                        <div class="duplicate-paths">{% for path in group.files %}<p>{{ path }}</p>{% endfor %}</div>
+                    </details>
+                    {% endfor %}
+                </div>
+                <p class="panel-footnote">Previewing up to three groups. Open the full report to review every group.</p>
+                {% else %}
+                <div class="empty-state"><span class="empty-icon" aria-hidden="true">⧉</span><h4>No duplicate groups available</h4><p>Duplicate results will appear here after duplicate detection has run and its results have been saved.</p></div>
+                {% endif %}
+            </section>
+        </div>
 
-        <footer class="page-footer">
-            Smart File Intelligence System
-            <span>Local-first file analysis</span>
-        </footer>
+        <footer class="page-footer"><span>Smart File Intelligence</span><span>Local-first file analysis</span></footer>
     </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script
-        src="{{ url_for('static', filename='js/dashboard.js') }}"
-        defer
-    ></script>
-
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}" defer></script>
 </body>
 </html>
