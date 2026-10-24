@@ -5,10 +5,16 @@ __pycache__/
 # Virtual environment
 .venv/
 
-# SQLite database files
+# Local SQLite databases and their transaction/journal sidecars (may contain private scan paths)
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 
 # Environment variables and secrets
 .env

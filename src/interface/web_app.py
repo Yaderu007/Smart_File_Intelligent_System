@@ -212,6 +212,7 @@ def dashboard():
     total_storage = 0
     average_size = 0.0
     potential_savings = 0
+    total_duplicate_files = 0
 
     if scans:
         requested_id = request.args.get("scan_id", type=int)
@@ -227,6 +228,24 @@ def dashboard():
         files = get_files_by_scan(scan_id)
         largest_files = get_largest_files_from_db(scan_id, limit=5)
         category_stats = get_category_stats(files)
+        # For each category, compare its largest individual file with the
+        # category's total storage (not with the largest category overall).
+        category_totals = {}
+        category_largest = {}
+        for file in files:
+            category = file.category or "Other"
+            size = max(0, int(file.size or 0))
+            category_totals[category] = category_totals.get(category, 0) + size
+            category_largest[category] = max(category_largest.get(category, 0), size)
+        largest_category_stats = [
+            {
+                "category": category,
+                "total_size": total,
+                "largest_size": category_largest[category],
+                "percentage": (category_largest[category] / total * 100) if total else 0,
+            }
+            for category, total in sorted(category_totals.items(), key=lambda pair: pair[1], reverse=True)
+        ]
         total_storage = get_total_storage(scan_id)
         average_size = calc_avg_size(files)
 
@@ -243,7 +262,11 @@ def dashboard():
             for detail in duplicate_details[:3]
         ]
 
-        # Sum every group, not just the three-group dashboard preview.
+        # KPI values use every saved group, not just the three-group preview.
+        total_duplicate_files = sum(
+            detail["group"].duplicate_count
+            for detail in duplicate_details
+        )
         potential_savings = sum(
             detail["group"].potential_savings
             for detail in duplicate_details
@@ -256,7 +279,9 @@ def dashboard():
         files=files,
         largest_files=largest_files,
         category_stats=category_stats,
+        largest_category_stats=largest_category_stats if scans else [],
         duplicate_groups=duplicate_groups,
+        total_duplicate_files=total_duplicate_files,
         total_storage=total_storage,
         average_size=average_size,
         potential_savings=potential_savings,
